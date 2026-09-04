@@ -6503,11 +6503,16 @@ def _format_cloud_resource_lines(snap: dict[str, Any]) -> list[str]:
     return [f"  Compute: {' · '.join(parts)}"] if parts else []
 
 
+# Written for BOTH callers: an interactive session parks and is woken by the
+# watcher, a headless one (`lqh tool call`) has no session to wake and needs an
+# instruction it can actually follow (feedback #126).
 _TRAINING_STATUS_RATE_LIMIT_HINT = (
-    "LQH is already watching this training run in the background. Do not poll "
-    "training_status again; if you need to wait for completion, end the "
-    "conversation without emitting another tool call. The session will wake "
-    "automatically when the watcher observes completion."
+    "LQH is already watching this training run in the background, so polling "
+    "it again will keep hitting the rate limit. In a conversation: stop here "
+    "without emitting another tool call — the session wakes automatically when "
+    "the watcher observes completion. Headless: call training_status with no "
+    "run_name (one answer for every run, not throttled per run) or retry this "
+    "call in a minute."
 )
 
 

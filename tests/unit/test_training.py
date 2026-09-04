@@ -1060,8 +1060,11 @@ class TestTrainingToolValidation:
         result = await handle_training_status(training_workspace, run_name="cloud_sft")
 
         assert "Error checking remote status: 429: Too Many Requests" in result.content
-        assert "Do not poll training_status again" in result.content
-        assert "wake automatically" in result.content
+        assert "will keep hitting the rate limit" in result.content
+        # Both callers get advice they can follow: park (interactive) or
+        # fall back to the un-throttled list call (headless).
+        assert "wakes automatically" in result.content
+        assert "training_status with no run_name" in result.content
 
     async def test_start_local_eval_missing_model(
         self, training_workspace: Path, stub_torch_available,
