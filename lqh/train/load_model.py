@@ -45,6 +45,7 @@ __all__ = [
     "ModelKind",
     "Modality",
     "assert_adapter_applied",
+    "load_peft_adapter",
     "detect_kind",
     "detect_modality",
     "display_model_ref",
@@ -148,8 +149,85 @@ def detect_modality(path_or_id: str, *, base_override: str | None = None) -> Mod
     return "text"
 
 
+def _stack_versions() -> str:
+    """``transformers``/``peft``/``torch`` versions for an adapter verdict.
+
+    A key mismatch is always a version skew between the machine that
+    trained the adapter and this one, and neither side used to record
+    what it was running — which turned a one-line diagnosis into a
+    multi-day one (feedback #127). Read from installed metadata so the
+    line costs no imports.
+    """
+    import importlib.metadata as md
+
+    parts = []
+    for mod in ("transformers", "peft", "torch"):
+        try:
+            parts.append(f"{mod} {md.version(mod)}")
+        except Exception:  # noqa: BLE001,S112 — not installed / odd dist
+            continue
+    return ", ".join(parts) or "unknown"
+
+
+def _missing_key_families(keys: list[str]) -> str:
+    """Collapse missing adapter keys to ``path x count`` families.
+
+    A whole vision tower is ~108 keys; the reader needs the shape, not
+    the list. Layer indices become ``N`` so the families collapse.
+    """
+    import re
+
+    families: dict[str, int] = {}
+    for key in keys:
+        family = re.sub(r"\.\d+\.", ".N.", key)
+        families[family] = families.get(family, 0) + 1
+    ranked = sorted(families.items(), key=lambda kv: (-kv[1], kv[0]))
+    shown = ", ".join(f"{name} x{count}" for name, count in ranked[:4])
+    if len(ranked) > 4:
+        shown += f", (+{len(ranked) - 4} more)"
+    return shown
+
+
+def load_peft_adapter(base_model: Any, path_or_id: str, **kwargs: Any) -> tuple[Any, list[str]]:
+    """``PeftModel.from_pretrained`` plus the keys PEFT could not place.
+
+    PEFT computes exactly the set of adapter parameters it failed to
+    match against the injected modules, but ``from_pretrained`` only
+    reports it as a ``UserWarning`` — which is invisible in a cloud
+    sandbox's stdout. Capture it so :func:`assert_adapter_applied` can
+    make it a verdict. Every other warning is re-emitted untouched — in a
+    ``finally``, so a load that raises still surfaces whatever PEFT said
+    on the way down.
+    """
+    import re
+    import warnings
+
+    from peft import PeftModel
+
+    missing: list[str] = []
+    caught: list[Any] = []
+    try:
+        with warnings.catch_warnings(record=True) as recorded:
+            warnings.simplefilter("always")
+            caught = recorded
+            wrapped = PeftModel.from_pretrained(base_model, path_or_id, **kwargs)
+    finally:
+        for entry in caught:
+            text = str(entry.message)
+            if "missing adapter keys" in text:
+                missing.extend(re.findall(r"'([^']+)'", text))
+            else:
+                warnings.warn(entry.message, entry.category, stacklevel=2)
+    return wrapped, missing
+
+
 def assert_adapter_applied(
-    wrapped: Any, adapter_dir: str, base: str, *, strict: bool = True,
+    wrapped: Any,
+    adapter_dir: str,
+    base: str,
+    *,
+    strict: bool = True,
+    missing_keys: list[str] | None = None,
 ) -> None:
     """Fail loudly when a just-loaded LoRA adapter has no effect.
 
@@ -163,12 +241,35 @@ def assert_adapter_applied(
     model and reports the numbers as the checkpoint's, with nothing in
     the log to say so.
 
+    ``missing_keys`` (from :func:`load_peft_adapter`) covers the
+    *partial* version of that failure, which the zero-count below cannot
+    see: when only part of the checkpoint fails to match — a VLM adapter
+    whose vision tower moved under a ``vision_model.`` segment, say —
+    the language-side factors still load, ``applied`` is never 0, and
+    the old verdict line read like a pass while the model ran base-model
+    vision (feedback #127). Any missing key is a failure.
+
     Returns without a verdict — saying so on stdout, the surface the
     reader actually gets — when the model can't be introspected (test
     stubs, meta/offloaded params) or carries no ``lora_B`` factors at
     all (a non-LoRA adapter type), so this only ever fires on a proven
     no-op.
     """
+    if missing_keys:
+        message = (
+            f"LoRA adapter {adapter_dir} loaded onto base {base} but "
+            f"{len(missing_keys)} of its parameters were NOT applied: PEFT "
+            f"found no matching injected module, so those factors are still "
+            f"at zero init and that part of the model IS the base model. "
+            f"Unmatched: {_missing_key_families(missing_keys)}. This is a "
+            f"peft / transformers version skew between the machine that "
+            f"trained the adapter and this one (here: {_stack_versions()}). "
+            f"Any eval of this model reports partly BASE-model scores."
+        )
+        if strict:
+            raise RuntimeError(f"{message} Refusing to continue.")
+        print(f"  WARNING: {message}", flush=True)
+        return
     try:
         tensors = [p for name, p in wrapped.named_parameters() if "lora_B" in name]
     except Exception as exc:  # noqa: BLE001 — a stub / exotic wrapper
@@ -198,7 +299,7 @@ def assert_adapter_applied(
         return
     print(
         f"  adapter applied: {applied}/{len(tensors)} lora_B modules carry "
-        f"trained weights (base: {base})",
+        f"trained weights (base: {base}; {_stack_versions()})",
         flush=True,
     )
 
@@ -302,16 +403,15 @@ def load_for_inference(
         return model, tokenizer
 
     # adapter
-    from peft import PeftModel
-
     base = resolve_base_model(path_or_id, base_override)
     logger.info("load_for_inference: adapter %s on base %s (transient merge)",
                 path_or_id, base)
     base_model = model_cls.from_pretrained(
         base, dtype=dtype, device_map=device_map,
     )
-    wrapped = PeftModel.from_pretrained(base_model, path_or_id)
-    assert_adapter_applied(wrapped, path_or_id, base, strict=verify_adapter)
+    wrapped, missing = load_peft_adapter(base_model, path_or_id)
+    assert_adapter_applied(wrapped, path_or_id, base, strict=verify_adapter,
+                           missing_keys=missing)
     merged = wrapped.merge_and_unload()
     tokenizer = _tok(path_or_id, base)
     return merged, tokenizer

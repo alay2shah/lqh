@@ -548,3 +548,245 @@ def test_assert_adapter_applied_non_strict_warns_instead_of_raising(capsys):
     ])
     assert_adapter_applied(model, "/ckpt", "fake/base", strict=False)
     assert "WARNING" in capsys.readouterr().out
+
+
+def test_assert_adapter_applied_raises_on_a_partially_applied_adapter():
+    """The reported failure: a VLM adapter whose vision tower moved under
+    a ``vision_model.`` segment loads its language keys fine, so the
+    zero-count never fires and the verdict line reads like a pass while
+    the vision half runs base weights (feedback #127)."""
+    from lqh.train.load_model import assert_adapter_applied
+
+    model = _FakeModel([
+        ("base_model.model.model.layers.0.q_proj.lora_B.default.weight", _FakeTensor(9)),
+        (("base_model.model.model.vision_tower.encoder.layers.0.q_proj."
+          "lora_B.default.weight"), _FakeTensor(0)),
+    ])
+    missing = [
+        f"base_model.model.model.vision_tower.encoder.layers.{i}.self_attn."
+        f"{proj}.lora_{ab}.default.weight"
+        for i in range(27) for proj in ("q_proj", "v_proj") for ab in ("A", "B")
+    ]
+    with pytest.raises(RuntimeError, match="were NOT applied"):
+        assert_adapter_applied(model, "/ckpt/model-lora", "fake/base",
+                               missing_keys=missing)
+
+
+def test_assert_adapter_applied_missing_keys_message_collapses_families(capsys):
+    """108 unmatched keys is 4 families x 27 layers — the reader needs the
+    shape, and the versions that caused the skew."""
+    from lqh.train.load_model import assert_adapter_applied
+
+    missing = [
+        f"base_model.model.model.vision_tower.encoder.layers.{i}.self_attn."
+        f"{proj}.lora_{ab}.default.weight"
+        for i in range(27) for proj in ("q_proj", "v_proj") for ab in ("A", "B")
+    ]
+    # strict=False so in-training loaders keep their checkpoint.
+    assert_adapter_applied(_FakeModel([]), "/ckpt", "fake/base",
+                           strict=False, missing_keys=missing)
+    out = capsys.readouterr().out
+    assert "108 of its parameters were NOT applied" in out
+    assert "layers.N.self_attn.q_proj.lora_A.default.weight x27" in out
+
+
+def test_adapter_verdicts_stamp_the_installed_stack(monkeypatch, capsys):
+    """The skew is a version story and neither image recorded its versions,
+    which is what made #127 take days to diagnose. Both verdicts carry them."""
+    from lqh.train import load_model
+
+    monkeypatch.setattr(load_model, "_stack_versions", lambda: "STACK-SENTINEL")
+
+    load_model.assert_adapter_applied(
+        _FakeModel([("layers.0.q_proj.lora_B.default.weight", _FakeTensor(3))]),
+        "/ckpt", "fake/base",
+    )
+    assert "STACK-SENTINEL" in capsys.readouterr().out
+
+    load_model.assert_adapter_applied(
+        _FakeModel([]), "/ckpt", "fake/base",
+        strict=False, missing_keys=["a.lora_A.default.weight"],
+    )
+    assert "STACK-SENTINEL" in capsys.readouterr().out
+
+
+def test_assert_adapter_applied_ignores_empty_missing_keys(capsys):
+    """A clean load passes the missing-key gate and falls through to the
+    existing zero-count verdict."""
+    from lqh.train.load_model import assert_adapter_applied
+
+    model = _FakeModel([
+        ("base_model.model.layers.0.q_proj.lora_B.default.weight", _FakeTensor(7)),
+    ])
+    assert_adapter_applied(model, "/ckpt", "fake/base", missing_keys=[])
+    assert "adapter applied: 1/1" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# load_peft_adapter
+# ---------------------------------------------------------------------------
+
+
+def test_load_peft_adapter_captures_pefts_missing_key_warning(
+    stub_torch_transformers_peft,
+):
+    """PEFT knows exactly which keys it could not place, but only says so
+    in a UserWarning that nothing reads in a cloud sandbox."""
+    import warnings
+
+    from lqh.train.load_model import load_peft_adapter
+
+    s = stub_torch_transformers_peft
+    wrapped_obj = MagicMock(name="peft_wrapped")
+
+    def _from_pretrained(base, model_id, **kwargs):
+        warnings.warn(
+            "Found missing adapter keys while loading the checkpoint: "
+            "['base_model.model.model.vision_tower.encoder.layers.0.self_attn."
+            "v_proj.lora_A.default.weight', 'base_model.model.model."
+            "vision_tower.encoder.layers.0.self_attn.v_proj.lora_B.default."
+            "weight']."
+        )
+        return wrapped_obj
+
+    s.PeftModel.from_pretrained.side_effect = _from_pretrained
+
+    wrapped, missing = load_peft_adapter(MagicMock(), "/ckpt")
+
+    assert wrapped is wrapped_obj
+    assert len(missing) == 2
+    assert all("vision_tower" in key for key in missing)
+
+
+def test_load_peft_adapter_reemits_other_warnings(stub_torch_transformers_peft):
+    """Capturing must not swallow the rest of PEFT's diagnostics."""
+    import warnings
+
+    from lqh.train.load_model import load_peft_adapter
+
+    s = stub_torch_transformers_peft
+
+    def _from_pretrained(base, model_id, **kwargs):
+        warnings.warn("Could not find a config file", UserWarning)
+        return MagicMock()
+
+    s.PeftModel.from_pretrained.side_effect = _from_pretrained
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _, missing = load_peft_adapter(MagicMock(), "/ckpt")
+
+    assert missing == []
+    assert any("config file" in str(w.message) for w in caught)
+
+
+def test_load_for_inference_fails_on_a_partially_applied_adapter(
+    stub_torch_transformers_peft, tmp_path: Path
+):
+    """End of the reported path: every eval and deploy goes through here,
+    so the partial load must stop the run instead of scoring the base."""
+    import warnings
+
+    from lqh.train.load_model import load_for_inference
+
+    (tmp_path / "adapter_config.json").write_text(
+        json.dumps({"base_model_name_or_path": "fake/base"})
+    )
+    s = stub_torch_transformers_peft
+    s.AutoModelForCausalLM.from_pretrained.return_value = MagicMock()
+
+    def _from_pretrained(base, model_id, **kwargs):
+        warnings.warn(
+            "Found missing adapter keys while loading the checkpoint: "
+            "['base_model.model.model.vision_tower.encoder.layers.0.self_attn."
+            "v_proj.lora_B.default.weight']."
+        )
+        return MagicMock(name="peft_wrapped")
+
+    s.PeftModel.from_pretrained.side_effect = _from_pretrained
+
+    with pytest.raises(RuntimeError, match="were NOT applied"):
+        load_for_inference(str(tmp_path))
+
+
+def test_load_peft_adapter_detects_a_real_key_mismatch(tmp_path: Path):
+    """The stubbed tests above only prove the regex against itself: they
+    hand-copy PEFT's warning text. This one round-trips a real adapter
+    through real PEFT, so a wording change upstream (PEFT's own source
+    calls the text changeable) fails here instead of silently restoring
+    feedback #127 — an unmatched checkpoint that reads like a pass.
+
+    Two modules differing only in an extra ``vision_model`` nesting level
+    reproduce the reported skew (transformers 5.3 nested the siglip2
+    tower one level deeper than 5.12+) without a hub download.
+    """
+    torch = pytest.importorskip("torch")
+    peft = pytest.importorskip("peft")
+
+    from lqh.train.load_model import assert_adapter_applied, load_peft_adapter
+
+    class _Inner(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q_proj = torch.nn.Linear(8, 8)
+
+    class _Nested(torch.nn.Module):
+        """transformers 5.3: tower.vision_model.q_proj"""
+
+        def __init__(self):
+            super().__init__()
+            self.vision_model = _Inner()
+
+    class _Flat(torch.nn.Module):
+        """transformers 5.12+: tower.q_proj"""
+
+        def __init__(self):
+            super().__init__()
+            self.q_proj = torch.nn.Linear(8, 8)
+
+    cfg = peft.LoraConfig(r=2, target_modules=["q_proj"])
+    trained = peft.get_peft_model(_Nested(), cfg)
+    with torch.no_grad():
+        for name, param in trained.named_parameters():
+            if "lora_B" in name:
+                param.add_(0.5)
+    trained.save_pretrained(str(tmp_path))
+
+    wrapped, missing = load_peft_adapter(_Flat(), str(tmp_path))
+
+    assert missing, "PEFT reported no missing keys for a renamed module path"
+    assert all("q_proj" in key for key in missing)
+    # And the guard turns that into a failure — the whole point of #127:
+    # every lora_B is still zero here, but the count alone could not tell
+    # a mismatch from an adapter that trained to nothing.
+    with pytest.raises(RuntimeError, match="were NOT applied"):
+        assert_adapter_applied(wrapped, str(tmp_path), "fake/base",
+                               missing_keys=missing)
+
+
+def test_load_peft_adapter_reports_no_missing_keys_on_a_matching_load(tmp_path: Path):
+    """The false-positive side of the same round trip: an adapter loaded
+    onto the structure it was trained on must come back clean, or the new
+    gate breaks every working eval and merge."""
+    torch = pytest.importorskip("torch")
+    peft = pytest.importorskip("peft")
+
+    from lqh.train.load_model import assert_adapter_applied, load_peft_adapter
+
+    class _Tower(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q_proj = torch.nn.Linear(8, 8)
+
+    cfg = peft.LoraConfig(r=2, target_modules=["q_proj"])
+    trained = peft.get_peft_model(_Tower(), cfg)
+    with torch.no_grad():
+        for name, param in trained.named_parameters():
+            if "lora_B" in name:
+                param.add_(0.5)
+    trained.save_pretrained(str(tmp_path))
+
+    wrapped, missing = load_peft_adapter(_Tower(), str(tmp_path))
+
+    assert missing == []
+    assert_adapter_applied(wrapped, str(tmp_path), "fake/base", missing_keys=missing)
