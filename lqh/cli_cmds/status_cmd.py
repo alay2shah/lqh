@@ -15,6 +15,20 @@ import sys
 from pathlib import Path
 
 
+def _remote_name(run_dir: Path) -> str | None:
+    """The remote a run was launched on, from its ``remote_job.json``.
+
+    ``None`` for a local run — and for a marker that cannot be read, since
+    that is what the scan reports for a run it could not attribute.
+    """
+    try:
+        meta = json.loads((run_dir / "remote_job.json").read_text())
+    except (OSError, ValueError):
+        return None
+    name = meta.get("remote_name")
+    return name if isinstance(name, str) else None
+
+
 async def _gather(project_dir: Path) -> dict:
     from lqh.jobs import JobSupervisor
     from lqh.signals import collect_signals
@@ -44,6 +58,20 @@ async def _gather(project_dir: Path) -> dict:
         run_states=run_states or None,
         jobs_refreshed=jobs_refreshed,
     )
+    if not jobs_refreshed and not snapshots:
+        # The scan timed out (or blew up) before it produced anything, but
+        # the run dirs are still on disk. An empty list here reads as "this
+        # project has no runs" — the exact opposite of the truth — so fall
+        # back to the same run-directory files the TUI startup path reads.
+        # jobs_refreshed/the refresh_failed signal already say these states
+        # may be stale.
+        from lqh.signals import observe_run_states
+
+        snapshots = [
+            (name, state, None, _remote_name(project_dir / "runs" / name))
+            for name, state in sorted(observe_run_states(project_dir).items())
+        ]
+
     return {
         "schema_version": 1,
         "runs": [
