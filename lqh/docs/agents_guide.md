@@ -163,6 +163,20 @@ On failure `result` is `null` and `error` is
 `upstream`, `runtime`. Legacy results not yet classified carry
 `meta.classified: false`. Progress/diagnostic output goes to stderr.
 
+`training_status` fills `result.details` with
+`{"runs": [{"run_name", "state"}, …]}` — one entry when `run_name` is
+given, one per run otherwise. Read the state from there rather than from
+`result.text`, which is prose for a human. `completed`, `failed` and
+`cancelled` are terminal; `running`, `waiting_for_scoring` and `unknown`
+are not. The set is open — an unrecognised state came through from the
+backend verbatim, so treat it as non-terminal and keep polling. The
+envelope is `ok: true` (exit 0) whenever the status *check* succeeded,
+including for a run whose own state is `failed`.
+
+Asked about one run by name, a cloud data-gen run whose dataset is still
+downloading also carries `dataset_download_pending: true`: `completed`
+does not mean the dataset is usable locally until that clears.
+
 ### Exit codes (all subcommands)
 
 | Code | Meaning |

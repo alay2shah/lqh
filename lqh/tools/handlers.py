@@ -6132,15 +6132,25 @@ async def handle_training_status(
                     "\n⏳ Dataset download pending — wait for the completion "
                     "notification before using the dataset locally."
                 )
+                for run in (result.details or {}).get("runs", []):
+                    run["dataset_download_pending"] = True
             return result
         status = manager.get_status(run_dir)
-        return ToolResult(content=_format_status(run_name, status, run_dir))
+        return ToolResult(
+            content=_format_status(run_name, status, run_dir),
+            ok=True,
+            details=_status_details([_run_state(run_name, status.state)]),
+        )
 
     runs_dir = project_dir / "runs"
     if not runs_dir.is_dir():
-        return ToolResult(content="No training runs found.")
+        return ToolResult(
+            content="No training runs found.", ok=True,
+            details=_status_details([]),
+        )
 
     parts: list[str] = []
+    runs: list[dict[str, Any]] = []
     for entry in sorted(runs_dir.iterdir()):
         if not entry.is_dir() or not (entry / "config.json").exists():
             continue
@@ -6150,13 +6160,40 @@ async def handle_training_status(
                 project_dir, entry.name, meta["remote_name"],
             )
             parts.append(remote_status.content)
+            # A failed poll still prints its error into `parts` but carries
+            # no state. A harness waiting for the fleet to go terminal must
+            # not see the run simply vanish from the list.
+            entries = (remote_status.details or {}).get("runs", [])
+            runs.extend(entries or [_run_state(entry.name, "unknown")])
         else:
             status = manager.get_status(entry)
             parts.append(_format_status(entry.name, status, entry))
+            runs.append(_run_state(entry.name, status.state))
 
     if not parts:
-        return ToolResult(content="No training runs found.")
-    return ToolResult(content="\n\n".join(parts))
+        return ToolResult(
+            content="No training runs found.", ok=True,
+            details=_status_details([]),
+        )
+    return ToolResult(
+        content="\n\n".join(parts), ok=True, details=_status_details(runs),
+    )
+
+
+def _run_state(run_name: str, state: str) -> dict[str, Any]:
+    """One run's machine-readable state for ``ToolResult.details``."""
+    return {"run_name": run_name, "state": state}
+
+
+def _status_details(runs: list[dict[str, Any]]) -> dict[str, Any]:
+    """The ``details`` payload of a training_status result.
+
+    The prose is written for a reader; a headless caller
+    (``lqh tool call training_status``) reads ``result.details.runs[].state``
+    from the envelope instead of regexing the markdown. Single-run and
+    list mode share the one shape — a list, of one entry or many.
+    """
+    return {"runs": runs}
 
 
 def _read_remote_meta(run_dir: Path) -> dict[str, Any] | None:
@@ -6316,7 +6353,10 @@ async def _training_status_remote(
     if sweep_lines:
         lines.extend(sweep_lines)
 
-    return ToolResult(content="\n".join(lines))
+    return ToolResult(
+        content="\n".join(lines), ok=True,
+        details=_status_details([_run_state(run_name, status.state)]),
+    )
 
 
 def _format_cloud_resource_lines(snap: dict[str, Any]) -> list[str]:

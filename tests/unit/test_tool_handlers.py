@@ -844,3 +844,135 @@ class TestLfmLicenseStamp:
         assert result.error_kind is None, result.content
         assert (target / "README.md").read_text() == card
         assert "LFM Open License" not in result.content
+
+
+class TestTrainingStatusStructuredState:
+    """A headless caller reads the run state from `details`, not the prose.
+
+    `lqh tool call training_status` is the poll a harness runs in a loop;
+    before this the only machine-readable state was a regex over the
+    markdown (feedback #123).
+    """
+
+    def _run(self, tmp_path: Path, name: str) -> Path:
+        run_dir = tmp_path / "runs" / name
+        run_dir.mkdir(parents=True)
+        (run_dir / "config.json").write_text(json.dumps({"type": "sft"}))
+        return run_dir
+
+    @pytest.mark.asyncio
+    async def test_single_run_reports_its_state(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from lqh.tools.handlers import handle_training_status
+
+        self._run(tmp_path, "sft_001")
+        monkeypatch.setattr(
+            "lqh.subprocess_manager.SubprocessManager.get_status",
+            lambda self, run_dir: SimpleNamespace(
+                state="completed", step=None, loss=None, lr=None,
+                epoch=None, error=None,
+            ),
+        )
+        result = await handle_training_status(tmp_path, run_name="sft_001")
+        assert result.ok is True
+        assert result.details == {
+            "runs": [{"run_name": "sft_001", "state": "completed"}]
+        }
+
+    @pytest.mark.asyncio
+    async def test_list_mode_reports_every_run(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from lqh.tools.handlers import handle_training_status
+
+        self._run(tmp_path, "sft_001")
+        self._run(tmp_path, "sft_002")
+        states = {"sft_001": "running", "sft_002": "failed"}
+        monkeypatch.setattr(
+            "lqh.subprocess_manager.SubprocessManager.get_status",
+            lambda self, run_dir: SimpleNamespace(
+                state=states[run_dir.name], step=None, loss=None, lr=None,
+                epoch=None, error=None,
+            ),
+        )
+        result = await handle_training_status(tmp_path)
+        assert result.details == {
+            "runs": [
+                {"run_name": "sft_001", "state": "running"},
+                {"run_name": "sft_002", "state": "failed"},
+            ]
+        }
+
+    @pytest.mark.asyncio
+    async def test_no_runs_is_an_empty_list_not_a_missing_key(
+        self, tmp_path: Path
+    ) -> None:
+        from lqh.tools.handlers import handle_training_status
+
+        result = await handle_training_status(tmp_path)
+        assert result.ok is True
+        assert result.details == {"runs": []}
+
+    @pytest.mark.asyncio
+    async def test_a_failed_poll_keeps_the_run_in_the_list(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A run whose remote poll errored must not vanish from `details`.
+
+        Its prose still lands in the text, and the envelope stays ok — a
+        harness waiting for every run to go terminal would otherwise read
+        the shortened list as "the fleet is done".
+        """
+        from lqh.tools import handlers
+
+        run_dir = self._run(tmp_path, "sft_001")
+        (run_dir / "remote_job.json").write_text(
+            json.dumps({"remote_name": "cloud", "job_id": "j1",
+                        "remote_run_dir": "/r"})
+        )
+
+        async def fake_remote(project_dir, run_name, remote_name):
+            return handlers.ToolResult.fail(
+                "upstream", "Error checking remote status: boom",
+            )
+
+        monkeypatch.setattr(handlers, "_training_status_remote", fake_remote)
+        result = await handlers.handle_training_status(tmp_path)
+        assert result.details == {
+            "runs": [{"run_name": "sft_001", "state": "unknown"}]
+        }
+
+    @pytest.mark.asyncio
+    async def test_pending_dataset_download_is_flagged(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """`completed` on a cloud data-gen run does not mean "usable yet"."""
+        from lqh.tools import handlers
+
+        run_dir = self._run(tmp_path, "datagen_001")
+        (run_dir / "remote_job.json").write_text(
+            json.dumps({"remote_name": "cloud", "job_id": "j1",
+                        "remote_run_dir": "/r"})
+        )
+        (run_dir / ".lqh_data_gen.json").write_text("{}")
+
+        async def fake_remote(project_dir, run_name, remote_name):
+            return handlers.ToolResult(
+                content="✅ **datagen_001** — completed",
+                ok=True,
+                details={"runs": [{"run_name": run_name, "state": "completed"}]},
+            )
+
+        monkeypatch.setattr(handlers, "_training_status_remote", fake_remote)
+        result = await handlers.handle_training_status(
+            tmp_path, run_name="datagen_001"
+        )
+        assert result.details == {
+            "runs": [{
+                "run_name": "datagen_001",
+                "state": "completed",
+                "dataset_download_pending": True,
+            }]
+        }
+        assert "Dataset download pending" in result.content
