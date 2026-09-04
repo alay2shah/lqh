@@ -68,7 +68,7 @@ logger = logging.getLogger(__name__)
 # matching the terminal's background is picked here, once, at startup.
 TUI_STYLE = Style.from_dict(active_palette().tui_style)
 
-OTHER_OPTION = "Other (type your own answer)"
+OTHER_OPTION = "Other (press Enter to type your own answer)"
 
 
 def _is_other_option(option: str) -> bool:
@@ -428,8 +428,14 @@ class LqhApp:
             if not self._ask_user_options:
                 return
             idx = self._ask_user_selected
-            # "Other" option cannot be toggled via checkbox
+            # The "Other" row has no checkbox to tick. Space on it opens the
+            # same free-text prompt Enter does, instead of being a dead key.
             if self._ask_user_allow_other and self._ask_user_options[idx] == OTHER_OPTION:
+                # Enter resets the buffer before resolving; a whitespace-only
+                # line passes the input_empty filter, so do the same here.
+                event.app.current_buffer.reset()
+                self._resolve_ask_user("")
+                event.app.invalidate()
                 return
             if idx in self._ask_user_checked:
                 self._ask_user_checked.discard(idx)

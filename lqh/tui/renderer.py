@@ -328,9 +328,10 @@ def render_options(
     selection.
 
     *other_index* marks the auto-appended "Other" row in multi-select mode. It
-    has no checkbox to toggle — it is filled by typing — so it echoes whatever
-    is currently in the input line (*other_text*) and ticks itself once that is
-    non-empty, otherwise the row looks permanently unselectable.
+    has no checkbox to toggle — it is filled by typing, either after picking it
+    or straight away — so it echoes whatever is currently in the input line
+    (*other_text*) and ticks itself once that is non-empty, otherwise the row
+    looks permanently unselectable.
     """
     buf = StringIO()
     console = Console(
@@ -375,7 +376,10 @@ def render_options(
             elif other_index is not None:
                 # The Other row has no checkbox to toggle: it is filled by
                 # typing, and Enter then submits it together with the ticks.
-                hint = "    Space: toggle  Enter: confirm  ·  type your own answer for Other"
+                hint = (
+                    "    Space: toggle  Enter: confirm  ·  "
+                    "Enter on Other to type your own answer"
+                )
             else:
                 hint = "    Space: toggle  Enter: confirm"
             console.print(Text(hint, style="dim italic"))
@@ -388,9 +392,10 @@ def render_options(
                 console.print(Text(f"    {opt}", style="dim"))
         hint = "    ↑↓: navigate  Enter: select"
         if allow_other:
-            # The auto-appended "Other" row needs Enter first, THEN typing — the
-            # single most common point of confusion. Spell out both paths.
-            hint += "  ·  pick Other (or just type) for your own answer"
+            # Pick the "Other" row first, THEN type — users arriving from other
+            # agent consoles expect exactly that, and the older wording ("or
+            # just type") read as an instruction to type before choosing it.
+            hint += "  ·  pick Other to type your own answer"
         console.print(Text(hint, style="dim italic"))
 
     console.print()

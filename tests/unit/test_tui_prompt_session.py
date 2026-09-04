@@ -319,13 +319,83 @@ class TestPromptSession:
         )
         assert res == "alpha, my own answer"
 
+    async def test_single_select_other_takes_enter_then_typing(
+        self, app: LqhApp,
+    ) -> None:
+        """Enter on the Other row opens the free-text prompt; typing follows.
+
+        Users arriving from other agent consoles select "Other" first and type
+        afterwards — the row label promises exactly that.
+        """
+
+        seen: dict[str, object] = {}
+
+        def _capture(a: LqhApp) -> None:
+            # Recorded, not asserted: an assertion raised inside the key
+            # processor never lets the driver exit, so the test would hang
+            # instead of failing.
+            seen["prompt"] = a._managed_ansi
+            seen["options"] = a._ask_user_options
+
+        res = await _drive_ask_user(
+            app,
+            ["alpha", "beta", OTHER_OPTION],
+            [
+                (DOWN, None),
+                (DOWN, None),
+                (ENTER, _capture),
+                ("my own answer", None),
+                (ENTER, None),
+            ],
+            multi_select=False,
+            allow_other=True,
+        )
+        assert seen["options"] is None
+        assert "Type your own answer" in str(seen["prompt"])
+        assert res == "my own answer"
+
+    async def test_multi_select_space_on_other_opens_free_text(
+        self, app: LqhApp,
+    ) -> None:
+        """Space on the Other row is not a dead key — it opens free text.
+
+        The hint advertises "Space: toggle", so Space on the one row without a
+        toggleable checkbox has to do that row's job instead of nothing.
+        """
+
+        seen: dict[str, object] = {}
+
+        def _capture(a: LqhApp) -> None:
+            # Without the Space branch, typing lands in the still-open list and
+            # takes the pre-existing typed-echo path — same answer, different
+            # behaviour — so the intermediate state is what this test is for.
+            seen["prompt"] = a._managed_ansi
+            seen["options"] = a._ask_user_options
+
+        res = await _drive_ask_user(
+            app,
+            ["alpha", "beta", OTHER_OPTION],
+            [
+                (SPACE, None),  # tick alpha
+                (DOWN, None),
+                (DOWN, None),
+                (SPACE, _capture),  # on Other: free text, tick kept
+                ("my own answer", None),
+                (ENTER, None),
+            ],
+            allow_other=True,
+        )
+        assert seen["options"] is None
+        assert "Type additional items" in str(seen["prompt"])
+        assert res == "alpha, my own answer"
+
     def test_multi_select_render_marks_other_row(self, app: LqhApp) -> None:
         """The Other row is not a dead checkbox: it echoes and ticks on typing."""
         empty = render_options(
             ["alpha", OTHER_OPTION], 0, checked=set(), allow_other=True, other_index=1,
         )
-        assert "[ ] Other (type your own answer)" in empty
-        assert "type your own answer for Other" in empty
+        assert f"[ ] {OTHER_OPTION}" in empty
+        assert "Enter on Other to type your own answer" in empty
 
         typed = render_options(
             ["alpha", OTHER_OPTION],
