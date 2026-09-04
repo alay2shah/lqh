@@ -209,7 +209,16 @@ def render_tool_call(tool_name: str, arguments: dict, width: int = 100) -> str:
 
 
 def render_tool_result(tool_name: str, content: str, width: int = 100) -> str:
-    """Render a tool result."""
+    """Render a tool result.
+
+    A one-line result — "✅ Edited pipeline.py", the option picked in an
+    ask_user prompt — is printed as a plain green line. Boxing it and
+    titling the box with the tool name only restates the tool-call header
+    printed directly above, which is what made a session full of edit_file
+    and ask_user calls read as the same status twice. Multi-line output
+    keeps the titled panel: there the border is what separates the output
+    from the prose around it.
+    """
 
     def render(console: Console) -> None:
         display_name = TOOL_DISPLAY_NAMES.get(tool_name, tool_name)
@@ -218,6 +227,15 @@ def render_tool_result(tool_name: str, content: str, width: int = 100) -> str:
         display_content = content
         if len(display_content) > 2000:
             display_content = display_content[:2000] + "\n... (truncated)"
+
+        oneliner = display_content.strip()
+        if "\n" not in oneliner:
+            # The border used to be the only color on a result; on a plain
+            # line the text carries it, so a failure must not come out green.
+            failed = oneliner.lower().startswith("error") or oneliner.startswith("❌")
+            style = "red" if failed else "green"
+            console.print(Text(oneliner, style=style))
+            return
 
         console.print(
             Panel(

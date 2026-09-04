@@ -5,12 +5,15 @@ from __future__ import annotations
 import os
 import re
 
+import pytest
+
 from lqh.tui import renderer
 from lqh.tui.renderer import (
     LIQUID_AI_LOGO,
     WELCOME_LOGO,
     render_agent_message,
     render_system_message,
+    render_tool_result,
     render_user_message,
     render_welcome,
 )
@@ -105,3 +108,30 @@ class TestRenderer:
 
         widths = [len(_plain(line)) for line in rendered.splitlines()]
         assert 80 < max(widths) <= 100
+
+
+class TestToolResults:
+    """A one-line result must not restate the tool-call header above it."""
+
+    def test_one_line_result_is_not_boxed_or_titled(self) -> None:
+        rendered = _plain(render_tool_result("edit_file", "✅ Edited pipeline.py"))
+
+        assert "✅ Edited pipeline.py" in rendered
+        assert "╭" not in rendered
+        assert "Edit File" not in rendered
+
+    @pytest.mark.parametrize(
+        "content",
+        ["Error: file 'x.py' does not exist", "❌ Cannot reach box-1 via SSH."],
+    )
+    def test_one_line_failure_is_not_rendered_in_green(self, content: str) -> None:
+        rendered = render_tool_result("edit_file", content)
+
+        assert "\x1b[31m" in rendered
+        assert "\x1b[32m" not in rendered
+
+    def test_multi_line_result_keeps_its_titled_panel(self) -> None:
+        rendered = _plain(render_tool_result("read_file", "# Spec\nline two"))
+
+        assert "╭" in rendered
+        assert "Read File" in rendered
