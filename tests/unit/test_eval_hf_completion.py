@@ -225,7 +225,8 @@ def test_run_inference_writes_completed_without_defer_flag(tmp_path) -> None:
 
 
 def _score(monkeypatch, tmp_path: Path, *, cloud=True, summary=None,
-           raise_exc=None, result_file=False, stamp_raises=False):
+           raise_exc=None, result_file=False, stamp_raises=False,
+           infer_config=None):
     from lqh.infer import eval_hf
 
     monkeypatch.setattr("lqh.train.cloud_score.is_cloud_mode", lambda: cloud)
@@ -246,7 +247,9 @@ def _score(monkeypatch, tmp_path: Path, *, cloud=True, summary=None,
             eval_hf, "_stamp_real_metric",
             lambda *a: (_ for _ in ()).throw(RuntimeError("stamp boom")),
         )
-    return eval_hf._run_inline_scoring(tmp_path, {"scorer": "scorers/x.md"})
+    return eval_hf._run_inline_scoring(
+        tmp_path, infer_config or {"scorer": "scorers/x.md"},
+    )
 
 
 def test_inline_scoring_not_cloud_mode_is_failure(tmp_path, monkeypatch) -> None:
@@ -275,6 +278,47 @@ def test_inline_scoring_success(tmp_path, monkeypatch) -> None:
         summary={"scores": {"mean": 5.0}, "num_scored": 3}, result_file=True,
     )
     assert err is None
+
+
+def test_inline_scoring_records_unconstrained_decoding(tmp_path, monkeypatch) -> None:
+    """The published result has to say which protocol produced it —
+    a free-form eval and a schema-bound one are otherwise identical
+    files (feedback #125)."""
+    err = _score(
+        monkeypatch, tmp_path,
+        summary={"scores": {"mean": 5.0}, "num_scored": 3}, result_file=True,
+    )
+    assert err is None
+    result = json.loads((tmp_path / "eval_result.json").read_text())
+    assert result["decoding"] == "unconstrained"
+    # The validated fields survive the rewrite.
+    assert result["scores"]["mean"] == 5.0 and result["num_scored"] == 3
+
+
+def test_inline_scoring_records_constrained_decoding(tmp_path, monkeypatch) -> None:
+    err = _score(
+        monkeypatch, tmp_path,
+        summary={"scores": {"mean": 5.0}, "num_scored": 3}, result_file=True,
+        infer_config={
+            "scorer": "scorers/x.md",
+            "response_format": {"type": "object", "properties": {}},
+        },
+    )
+    assert err is None
+    result = json.loads((tmp_path / "eval_result.json").read_text())
+    assert result["decoding"] == "json_schema"
+
+
+def test_inline_scoring_empty_schema_is_unconstrained(tmp_path, monkeypatch) -> None:
+    """An empty schema reaches the engines as no constraint at all."""
+    err = _score(
+        monkeypatch, tmp_path,
+        summary={"scores": {"mean": 5.0}, "num_scored": 3}, result_file=True,
+        infer_config={"scorer": "scorers/x.md", "response_format": {}},
+    )
+    assert err is None
+    result = json.loads((tmp_path / "eval_result.json").read_text())
+    assert result["decoding"] == "unconstrained"
 
 
 def test_inline_scoring_stamp_failure_does_not_fail(tmp_path, monkeypatch) -> None:

@@ -352,6 +352,26 @@ def _run_inline_scoring(run_dir: Path, infer_config: dict[str, Any]) -> str | No
     if int(result.get("num_scored") or 0) < 1:
         return "eval_result.json reports zero scored samples"
 
+    # Stamp the effective decoding protocol onto the result that gets
+    # published. A schema-bound eval and a free-form one otherwise
+    # produce byte-identical result files, so a reader holding a number
+    # cannot tell which protocol produced it — and a job that ran
+    # unconstrained by accident reads as one that ran constrained.
+    # Truthiness, not `is not None`: an empty schema constrains nothing
+    # in either engine (both test `if response_format`).
+    result["decoding"] = (
+        "json_schema" if infer_config.get("response_format") else "unconstrained"
+    )
+    try:
+        result_path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    except OSError as exc:
+        # Provenance only — never fail an otherwise good eval over it.
+        print(
+            f"eval_hf: WARNING — could not stamp decoding protocol: {exc}",
+            flush=True,
+        )
+    print(f"eval_hf: decoding protocol = {result['decoding']}", flush=True)
+
     print(
         f"eval_hf: inline scoring summary keys="
         f"{sorted(summary.keys()) if isinstance(summary, dict) else type(summary).__name__}",
