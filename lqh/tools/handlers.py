@@ -2415,7 +2415,107 @@ async def _fetch_results_parquet_artifact(run_dir: Path) -> bool:
     return await _fetch_run_artifact(run_dir / "results.parquet")
 
 
-async def _hydrate_run_eval_artifacts(run_dir: Path) -> None:
+def _r2_artifact_basename(r2_key: str) -> str:
+    """The file name an artifact was uploaded under.
+
+    Upload keys are ``<prefix><kind>/<32 hex>-<basename>`` (backend
+    handler/artifacts.go UploadURL), so the file name survives the round
+    trip — the run-relative directory it sat in does not.
+    """
+    tail = r2_key.rsplit("/", 1)[-1]
+    return tail.split("-", 1)[1] if "-" in tail else tail
+
+
+async def _backfill_artifact_manifest(
+    project_dir: Path, run_dir: Path, relpaths: tuple[str, ...],
+) -> None:
+    """Repair a cloud run's artifacts.json from the backend's record.
+
+    artifacts.json is written from ``artifact`` SSE events. A job whose
+    publish phase runs after a backend restart never delivers them — the
+    reattached event pump deliberately does not re-read the sandbox's
+    stdout from the beginning — so a run that completed and published
+    fine can leave no local trace of artifacts that are registered and
+    downloadable. The backend's record is the source of truth: ask it
+    for this job's artifacts and re-derive the entries.
+
+    The record keeps only the uploaded file's basename, so a name is
+    honored only when exactly one of the job's artifacts carries it. A
+    run with mid-run checkpoint evals publishes several eval_result.json
+    and guessing which one is ``checkpoints/final/`` would report a
+    sampled mid-run score as the final one — leaving the entry out is
+    the safe answer. Best-effort; never raises.
+    """
+    manifest_path = run_dir / "artifacts.json"
+    known: set[str] = set()
+    try:
+        manifest = json.loads(manifest_path.read_text())
+        known = {
+            str(e.get("relpath"))
+            for e in (manifest.get("artifacts") or [])
+            if isinstance(e, dict) and e.get("artifact_id")
+        }
+    except (OSError, json.JSONDecodeError, AttributeError, TypeError):
+        pass
+    wanted = [
+        rel for rel in relpaths
+        if rel not in known and not (run_dir / rel).exists()
+    ]
+    if not wanted:
+        return
+    try:
+        meta = json.loads((run_dir / "remote_job.json").read_text())
+        job_id = str(meta.get("job_id") or "")
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return
+    if not job_id:
+        # Not a cloud run — nothing was ever registered for it.
+        return
+    by_name: dict[str, list[Any]] = {}
+    try:
+        from lqh.artifacts import BackendArtifactStore
+
+        handles = await BackendArtifactStore().list_for_project(
+            _ckey(project_dir), job_id=job_id, limit=500,
+        )
+        for handle in handles:
+            by_name.setdefault(_r2_artifact_basename(handle.r2_key), []).append(handle)
+    except Exception:  # noqa: BLE001 — hydration must not fail a status read
+        return
+    # A mid-run checkpoint eval scores a SAMPLE of the eval set and publishes
+    # eval_sampling.json beside its result. Once one exists, a lone
+    # eval_result.json is not necessarily the final one — the final eval can
+    # have been scored and unlinked (cloud_score.py) or never scored at all —
+    # and the sampling caveat lives in the checkpoint dir, so it cannot travel
+    # to the run root with the file. Rendering a 24-row mean as the run's
+    # final score is the one answer worse than rendering none.
+    if "eval_sampling.json" in by_name:
+        by_name.pop("eval_result.json", None)
+        by_name.pop("results.parquet", None)
+    for rel in wanted:
+        name = rel.rsplit("/", 1)[-1]
+        matches = by_name.get(name, [])
+        if len(matches) != 1:
+            continue
+        # One artifact, one entry: the caller asks for the same file name
+        # under two possible layouts (run root and checkpoints/final/), and
+        # a unique match means the run published exactly one of them — bind
+        # it to the first path asked for, which is the one readers check
+        # first, instead of mirroring it to both.
+        by_name[name] = []
+        try:
+            from lqh.remote.cloud import _append_artifact_manifest
+
+            _append_artifact_manifest(manifest_path, {
+                "artifact_id": matches[0].id,
+                "kind": matches[0].kind,
+                "relpath": rel,
+            })
+        except Exception:  # noqa: BLE001 — same
+            return
+
+
+async def _hydrate_run_eval_artifacts(project_dir: Path, run_dir: Path) -> None:
     """Pull a completed cloud run's eval + training-metric outputs into the
     local mirror.
 
@@ -2425,7 +2525,7 @@ async def _hydrate_run_eval_artifacts(run_dir: Path) -> None:
     run-root (sweep eval-of-best, standalone evals) and checkpoints/final/
     (non-sweep SFT). Best-effort; never raises.
     """
-    for rel in (
+    rels = (
         "eval_result.json",
         "results.parquet",
         "checkpoints/final/eval_result.json",
@@ -2437,17 +2537,23 @@ async def _hydrate_run_eval_artifacts(run_dir: Path) -> None:
         # A sweep's per-config training output is in sweep_<id>/, so the
         # leaderboard has to come down first to learn which child won.
         "sweep_summary.json",
-    ):
+    )
+    # A run whose artifact events were lost has no manifest to fetch
+    # against; rebuild what of it we can from the backend first.
+    await _backfill_artifact_manifest(project_dir, run_dir, rels)
+    for rel in rels:
         await _fetch_run_artifact(run_dir / rel)
 
     # Second pass, sweeps only: the winner's own training metrics + config
     # (which carries the swept learning rate the base config omits).
     if not (run_dir / "eval_history.json").exists():
         if config_id := _sweep_winner_config_id(run_dir):
-            for rel in (
+            sweep_rels = (
                 f"sweep_{config_id}/eval_history.json",
                 f"sweep_{config_id}/config.json",
-            ):
+            )
+            await _backfill_artifact_manifest(project_dir, run_dir, sweep_rels)
+            for rel in sweep_rels:
                 await _fetch_run_artifact(run_dir / rel)
 
 
@@ -2482,7 +2588,9 @@ async def handle_get_eval_failures(
     if not results_path.exists():
         # Cloud runs publish results.parquet as an artifact; sessions that
         # missed the completion download (or predate it) can still fetch
-        # it on demand from the run's artifacts.json manifest.
+        # it on demand from the run's artifacts.json manifest — repairing
+        # the manifest first for a run whose artifact events never arrived.
+        await _backfill_artifact_manifest(project_dir, run_dir, ("results.parquet",))
         await _fetch_results_parquet_artifact(run_dir)
     if not results_path.exists():
         hint = ""
@@ -6312,7 +6420,7 @@ async def _training_status_remote(
     # pull the eval outputs (aggregates + per-sample results) into the
     # local mirror so the final-eval block and get_eval_failures work.
     if status.state == "completed":
-        await _hydrate_run_eval_artifacts(run_dir)
+        await _hydrate_run_eval_artifacts(project_dir, run_dir)
 
     # Final eval from the local mirror (empty until eval_result.json syncs).
     lines.extend(_format_final_eval_block(run_dir))

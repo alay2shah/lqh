@@ -616,7 +616,7 @@ class TestTrainingHealthBlock:
             return False
 
         with patch.object(handlers, "_fetch_run_artifact", fake_fetch):
-            asyncio.run(handlers._hydrate_run_eval_artifacts(tmp_path))
+            asyncio.run(handlers._hydrate_run_eval_artifacts(tmp_path, tmp_path))
         assert "sweep_sft_lr0.0003_e3/eval_history.json" in fetched
         assert "sweep_sft_lr0.0003_e3/config.json" in fetched
 
@@ -647,7 +647,7 @@ class TestTrainingHealthBlock:
         with patch.object(handlers, "_fetch_run_artifact", fake_fetch):
             import asyncio
 
-            asyncio.run(handlers._hydrate_run_eval_artifacts(tmp_path))
+            asyncio.run(handlers._hydrate_run_eval_artifacts(tmp_path, tmp_path))
         assert "eval_history.json" in fetched
 
 
@@ -743,6 +743,154 @@ class TestCloudEvalArtifacts:
         assert target.read_bytes() == b"pq"
         # Unknown relpath → False, no crash.
         assert await _fetch_run_artifact(run / "nope.parquet") is False
+
+    def _handle(self, artifact_id: str, kind: str, filename: str) -> Any:
+        from lqh.artifacts import ArtifactHandle
+
+        return ArtifactHandle(
+            id=artifact_id, kind=kind, project_id="p", size_bytes=1,
+            r2_key=f"u/p/j/{kind}/{'a' * 32}-{filename}",
+        )
+
+    def _cloud_run(self, tmp_path: Path) -> Path:
+        run = tmp_path / "runs" / "r"
+        run.mkdir(parents=True)
+        (run / "remote_job.json").write_text(json.dumps({"job_id": "job-1"}))
+        return run
+
+    async def test_backfill_rebuilds_a_lost_manifest(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A job that published after a backend restart delivers no artifact
+        SSE events, so the run dir has no artifacts.json at all — the entries
+        have to come back from the backend's record."""
+        import lqh.artifacts as artifacts_mod
+        from lqh.tools.handlers import _backfill_artifact_manifest
+
+        run = self._cloud_run(tmp_path)
+        outer = self
+
+        class FakeStore:
+            async def list_for_project(
+                self, project_id: str, *, kind: Any = None,
+                job_id: Any = None, limit: int = 100,
+            ) -> list[Any]:
+                assert job_id == "job-1"
+                return [
+                    outer._handle("a1", "eval_result", "eval_result.json"),
+                    outer._handle("a2", "metrics", "eval_history.json"),
+                ]
+
+        monkeypatch.setattr(artifacts_mod, "BackendArtifactStore", FakeStore)
+        await _backfill_artifact_manifest(
+            tmp_path, run,
+            ("checkpoints/final/eval_result.json", "eval_history.json"),
+        )
+        entries = json.loads((run / "artifacts.json").read_text())["artifacts"]
+        assert {e["relpath"]: e["artifact_id"] for e in entries} == {
+            "checkpoints/final/eval_result.json": "a1",
+            "eval_history.json": "a2",
+        }
+
+    async def test_backfill_skips_an_ambiguous_file_name(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The record keeps the basename, not the run-relative dir. A run with
+        mid-run checkpoint evals published several eval_result.json — binding
+        one of them to checkpoints/final/ would report a sampled mid-run score
+        as the final one."""
+        import lqh.artifacts as artifacts_mod
+        from lqh.tools.handlers import _backfill_artifact_manifest
+
+        run = self._cloud_run(tmp_path)
+        outer = self
+
+        class FakeStore:
+            async def list_for_project(self, project_id: str, **kw: Any) -> list[Any]:
+                return [
+                    outer._handle("a1", "eval_result", "eval_result.json"),
+                    outer._handle("a2", "eval_result", "eval_result.json"),
+                ]
+
+        monkeypatch.setattr(artifacts_mod, "BackendArtifactStore", FakeStore)
+        await _backfill_artifact_manifest(
+            tmp_path, run, ("checkpoints/final/eval_result.json",),
+        )
+        assert not (run / "artifacts.json").exists()
+
+    async def test_backfill_binds_one_artifact_to_one_relpath(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Both layouts are asked for; the single published file is recorded
+        once, not mirrored to both paths."""
+        import lqh.artifacts as artifacts_mod
+        from lqh.tools.handlers import _backfill_artifact_manifest
+
+        run = self._cloud_run(tmp_path)
+        outer = self
+
+        class FakeStore:
+            async def list_for_project(self, project_id: str, **kw: Any) -> list[Any]:
+                return [outer._handle("a1", "predictions", "results.parquet")]
+
+        monkeypatch.setattr(artifacts_mod, "BackendArtifactStore", FakeStore)
+        await _backfill_artifact_manifest(
+            tmp_path, run,
+            ("results.parquet", "checkpoints/final/results.parquet"),
+        )
+        entries = json.loads((run / "artifacts.json").read_text())["artifacts"]
+        assert [(e["relpath"], e["artifact_id"]) for e in entries] == [
+            ("results.parquet", "a1"),
+        ]
+
+    async def test_backfill_skips_a_result_a_mid_run_eval_may_own(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """eval_sampling.json in the job means a mid-run checkpoint eval ran on
+        a sample of the eval set. A lone eval_result.json may be that one, and
+        the sampling caveat cannot follow it to the run root — so it is not
+        bound at all."""
+        import lqh.artifacts as artifacts_mod
+        from lqh.tools.handlers import _backfill_artifact_manifest
+
+        run = self._cloud_run(tmp_path)
+        outer = self
+
+        class FakeStore:
+            async def list_for_project(self, project_id: str, **kw: Any) -> list[Any]:
+                return [
+                    outer._handle("a1", "eval_result", "eval_result.json"),
+                    outer._handle("a2", "other", "eval_sampling.json"),
+                    outer._handle("a3", "metrics", "eval_history.json"),
+                ]
+
+        monkeypatch.setattr(artifacts_mod, "BackendArtifactStore", FakeStore)
+        await _backfill_artifact_manifest(
+            tmp_path, run, ("eval_result.json", "eval_history.json"),
+        )
+        entries = json.loads((run / "artifacts.json").read_text())["artifacts"]
+        # The history is unaffected; only the score is withheld.
+        assert [(e["relpath"], e["artifact_id"]) for e in entries] == [
+            ("eval_history.json", "a3"),
+        ]
+
+    async def test_backfill_leaves_a_local_run_alone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No cloud job → nothing was ever registered; don't call the API."""
+        import lqh.artifacts as artifacts_mod
+        from lqh.tools.handlers import _backfill_artifact_manifest
+
+        run = tmp_path / "runs" / "r"
+        run.mkdir(parents=True)
+
+        class FakeStore:
+            async def list_for_project(self, *a: Any, **kw: Any) -> list[Any]:
+                raise AssertionError("no backend call for a local run")
+
+        monkeypatch.setattr(artifacts_mod, "BackendArtifactStore", FakeStore)
+        await _backfill_artifact_manifest(tmp_path, run, ("eval_result.json",))
+        assert not (run / "artifacts.json").exists()
 
 
 # ---------------------------------------------------------------------------
