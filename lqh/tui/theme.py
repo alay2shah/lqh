@@ -43,6 +43,7 @@ class Palette:
     logo_glyphs: tuple[str, str, str]  # per-letter L / Q / H accents
     accent: str  # the tagline under the banner
     resume_command: str  # the `lqh --resume …` farewell hint
+    viewer_banner: str  # the agent's message atop the dataset viewer
     code_theme: str  # Pygments theme for code blocks and file views
     # prompt_toolkit style rules.
     tui_style: dict[str, str]
@@ -55,6 +56,7 @@ DARK_PALETTE = Palette(
     logo_glyphs=("bold #38bdf8", "bold #a78bfa", "bold #fbbf24"),
     accent="dim #94a3b8",
     resume_command="bold #60a5fa",
+    viewer_banner="bold #fbbf24",
     code_theme="monokai",
     tui_style={
         "status": "bg:#1a1a2e #e0e0e0",
@@ -84,6 +86,7 @@ LIGHT_PALETTE = Palette(
     logo_glyphs=("bold #0369a1", "bold #6d28d9", "bold #b45309"),
     accent="dim #475569",
     resume_command="bold #1d4ed8",
+    viewer_banner="bold #b45309",
     code_theme="friendly",
     tui_style={
         "status": "bg:#dde3ea #1f2937",

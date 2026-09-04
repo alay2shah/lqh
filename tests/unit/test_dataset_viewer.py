@@ -930,6 +930,27 @@ def test_unparseable_score_rendered_raw(tmp_path):
 # Default instruction banner + score provenance
 # ---------------------------------------------------------------------------
 
+@pytest.mark.parametrize(
+    "background,ink",
+    [("light", "38;2;180;83;9"), ("dark", "38;2;251;191;36")],
+)
+def test_banner_ink_follows_the_terminal_background(
+    tmp_path, monkeypatch, background, ink
+):
+    # Bright yellow is unreadable on a white terminal (feedback #117), so the
+    # banner takes its color from the palette instead of the terminal's own.
+    from lqh.tui import theme
+
+    monkeypatch.setenv("LQH_THEME", background)
+    theme.active_palette.cache_clear()
+    try:
+        p = write_chat_parquet(tmp_path / "data.parquet")
+        header = DatasetViewer(p, agent_message="Check tool calls").header_text(100)
+        assert ink in header
+    finally:
+        theme.active_palette.cache_clear()
+
+
 def test_default_banner_without_agent_message(tmp_path):
     p = write_chat_parquet(tmp_path / "data.parquet")
     v = DatasetViewer(p)

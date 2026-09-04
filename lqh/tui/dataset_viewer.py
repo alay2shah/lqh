@@ -695,7 +695,7 @@ class DatasetViewer:
             # viewport away — the full text is in the agent conversation.
             inner_buf, inner_console = _make_console(width)
             inner_console.print(
-                Text(f"💬 {self.agent_message}", style="bold bright_yellow")
+                Text(f"💬 {self.agent_message}", style=active_palette().viewer_banner)
             )
             banner_lines = inner_buf.getvalue().splitlines()
             if len(banner_lines) > _MAX_BANNER_LINES:
