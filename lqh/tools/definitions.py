@@ -1746,6 +1746,22 @@ def _build_all_tools(*, auto_mode: bool = False) -> list[dict]:
                             "\'training isn\'t working\' branch."
                         ),
                     },
+                    "seed": {
+                        "type": "integer",
+                        "description": (
+                            "Random seed for the run (init, data order, dropout). "
+                            "Default 42, so repeating a recipe repeats the run. Pass a "
+                            "different value to train a REPLICATE of a recipe you "
+                            "already ran: on small LoRA datasets the same "
+                            "hyperparameters can score anywhere in a wide band "
+                            "depending only on the draw, so a single number does not "
+                            "say how good the recipe is. Worth spending a couple of "
+                            "extra runs on before concluding that a change helped or "
+                            "hurt, or when a result looks unusually bad; the seed each "
+                            "run used is on the training_status health line. Do not "
+                            "change it for an ordinary first run."
+                        ),
+                    },
                     "num_iterations": {
                         "type": "integer",
                         "description": (

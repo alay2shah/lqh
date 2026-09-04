@@ -5249,6 +5249,7 @@ async def handle_start_training(
     lora: bool = True,
     num_epochs: int | None = None,
     learning_rate: float | None = None,
+    seed: int | None = None,
     num_iterations: int = 5,
     dpo_beta: float = 0.1,
     golden_source: str = "dataset",
@@ -5650,6 +5651,12 @@ async def handle_start_training(
     )
     lr = learning_rate if learning_rate is not None else recommended.learning_rate
     epochs = num_epochs if num_epochs is not None else recommended.num_epochs
+    try:
+        run_seed = hp_defaults.DEFAULT_SEED if seed is None else int(seed)
+    except (TypeError, ValueError):
+        return ToolResult.fail(
+            "validation", f"Error: seed must be an integer, got {seed!r}."
+        )
 
     config: dict[str, Any] = {
         "type": type,
@@ -5672,6 +5679,11 @@ async def handle_start_training(
         "training": {
             **recommended.training_config(),
             "learning_rate": lr,
+            # Always recorded, even at the default: a checkpoint whose seed is
+            # unknown cannot be reproduced, and replicates of one recipe on a
+            # small dataset differ enough that the seed belongs next to the
+            # score (feedback #121).
+            "seed": run_seed,
         },
         "lora": recommended.lora,
         "manifest": ["base_model", "dataset"],
@@ -6597,7 +6609,12 @@ def _format_training_health_block(run_dir: Path) -> list[str]:
     # a sweep's base_config carries the *pre-grid* learning rate, so falling
     # back would report a plausible wrong number — and the skill tells the agent
     # to retrain at 5x this value. Omitting it is the safe failure.
-    lr = _run_config_training_block(metrics_dir).get("learning_rate")
+    training_block = _run_config_training_block(metrics_dir)
+    lr = training_block.get("learning_rate")
+    # The seed belongs next to the score: two replicates of one recipe on a
+    # small dataset can land far apart, so "which draw was this" is part of
+    # reading the number (feedback #121).
+    run_seed = training_block.get("seed")
 
     parts: list[str] = []
     if steps:
@@ -6614,6 +6631,8 @@ def _format_training_health_block(run_dir: Path) -> list[str]:
         parts.append(f"lr {lr:.1e}")
     if not parts:
         return []
+    if isinstance(run_seed, int) and not isinstance(run_seed, bool):
+        parts.append(f"seed {run_seed}")
 
     lines = [f"  Training health: {' · '.join(parts)}"]
     from lqh.train.defaults import SFT_MIN_HEALTHY_OPTIMIZER_STEPS

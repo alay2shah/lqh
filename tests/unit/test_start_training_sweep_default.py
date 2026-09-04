@@ -343,3 +343,32 @@ def test_dpo_launch_skips_the_assistant_mask_check(launch, monkeypatch):
     monkeypatch.setattr(handlers, "_assistant_mask_unsupported", never)
     rec = launch(type="on_policy_dpo")
     assert rec["module"] == "lqh.train.sweep"
+
+
+# ---------------------------------------------------------------------------
+# Seed: recorded on every run, overridable for replicates (feedback #121).
+# ---------------------------------------------------------------------------
+
+
+def test_seed_is_recorded_even_when_the_caller_omits_it(launch):
+    """A checkpoint whose seed is unknown cannot be reproduced."""
+    from lqh.train import defaults
+
+    training = launch(type="sft")["config"]["training"]
+    assert training["seed"] == defaults.DEFAULT_SEED
+
+
+def test_explicit_seed_reaches_the_training_config(launch):
+    training = launch(type="sft", seed=7)["config"]["training"]
+    assert training["seed"] == 7
+
+
+def test_seed_is_recorded_under_a_sweep_too(launch):
+    base = launch(type="sft", enable_sweep=True, seed=7)["config"]["base_config"]
+    assert base["training"]["seed"] == 7
+
+
+def test_a_non_numeric_seed_is_rejected(launch):
+    rec = launch(type="sft", seed="nope")
+    assert rec["result"].ok is False
+    assert "seed must be an integer" in rec["result"].content

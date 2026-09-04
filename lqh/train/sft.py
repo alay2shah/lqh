@@ -19,6 +19,7 @@ from transformers import (
     TrainerControl,
     TrainerState,
     TrainingArguments,
+    set_seed,
 )
 from trl import SFTConfig, SFTTrainer
 
@@ -77,6 +78,7 @@ def _write_checkpoint_lineage(
         "per_device_batch_size": training_cfg.get("per_device_batch_size"),
         "gradient_accumulation_steps": training_cfg.get("gradient_accumulation_steps"),
         "effective_batch_size": training_cfg.get("effective_batch_size"),
+        "seed": training_cfg.get("seed"),
         # Not a knob: text SFT always trains on assistant tokens only
         # (lqh.train.assistant_mask). Recorded so checkpoints from before the
         # switch, whose lineage lacks the key, stay distinguishable.
@@ -1021,6 +1023,7 @@ def sft_loop(run_dir: Path, config: dict[str, Any]) -> None:
     # submission derives the batch to avoid it, but an explicit batch or a
     # tiny dataset can still land here), and the log cadence below.
     from lqh.train.defaults import (
+        DEFAULT_SEED,
         SFT_MIN_HEALTHY_OPTIMIZER_STEPS,
         fill_missing_hyperparameters,
         optimizer_steps,
@@ -1100,6 +1103,13 @@ def sft_loop(run_dir: Path, config: dict[str, Any]) -> None:
     # only, no eval).
     eval_steps = int(training_cfg.get("eval_steps", 50))
     has_eval = eval_dataset is not None
+    # Resolved (and persisted) above by fill_missing_hyperparameters, so a
+    # checkpoint's config, lineage and health line all name the seed it trained
+    # at. The fallback covers a caller that skipped that step.
+    _seed = training_cfg.get("seed")
+    seed = DEFAULT_SEED if _seed is None else int(_seed)
+    _data_seed = training_cfg.get("data_seed")
+    data_seed = seed if _data_seed is None else int(_data_seed)
     sft_kwargs: dict[str, Any] = dict(
         output_dir=checkpoint_output,
         num_train_epochs=training_cfg["num_epochs"],
@@ -1132,10 +1142,8 @@ def sft_loop(run_dir: Path, config: dict[str, Any]) -> None:
         dataloader_num_workers=training_cfg.get("dataloader_num_workers", 4),
         dataloader_pin_memory=True,
         ddp_find_unused_parameters=False,
-        seed=training_cfg.get("seed", 42),
-        data_seed=training_cfg.get(
-            "data_seed", training_cfg.get("seed", 42)
-        ),
+        seed=seed,
+        data_seed=data_seed,
     )
     if is_vision:
         # The VLMCollator owns tokenization; TRL must not try to prepare
@@ -1228,6 +1236,12 @@ def sft_loop(run_dir: Path, config: dict[str, Any]) -> None:
     if peft_config is not None:
         trainer_kwargs["peft_config"] = peft_config
 
+    # TRL attaches the LoRA adapter inside SFTTrainer.__init__, *before*
+    # transformers' Trainer applies args.seed — so the adapter's A matrices
+    # were initialised from an unseeded RNG and two runs of one recipe never
+    # started from the same point. Seed here and the whole run (init, shuffle,
+    # dropout) follows the configured seed. (feedback #121)
+    set_seed(seed)
     trainer = SFTTrainer(**trainer_kwargs)
 
     print("Starting training...")

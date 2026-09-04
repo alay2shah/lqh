@@ -167,6 +167,13 @@ SFT_MAX_EFFECTIVE_BATCH = 256
 # plausible cause, it does not establish one.
 SFT_MIN_HEALTHY_OPTIMIZER_STEPS = 50
 
+# The seed every run trains at unless the caller picks another one. Fixed so
+# two runs of the same recipe are the same run; varied deliberately (the
+# `seed` argument of start_training) when the question is how much of a score
+# is the recipe and how much is the draw — on small LoRA datasets that spread
+# is wide.
+DEFAULT_SEED = 42
+
 _DPO_TYPES = frozenset({"dpo", "on_policy_dpo"})
 _GRPO_TYPES = frozenset({"grpo", "on_policy_grpo"})
 
@@ -426,7 +433,8 @@ def fill_missing_hyperparameters(
     lora: bool = True,
     modality: str = "text",
 ) -> dict[str, Any]:
-    """Fill an absent (or null) ``learning_rate`` / ``num_epochs`` in place.
+    """Fill an absent (or null) ``learning_rate`` / ``num_epochs`` / ``seed``
+    in place.
 
     Returns only the keys it filled, so the caller can log them and persist the
     config — an empty dict means the config was already complete and must be
@@ -450,6 +458,11 @@ def fill_missing_hyperparameters(
     # None for DPO, which is bounded by num_iterations instead of epochs.
     if hp.num_epochs is not None and training_cfg.get("num_epochs") is None:
         filled["num_epochs"] = hp.num_epochs
+    # A run whose seed is not recorded cannot be repeated, and two replicates of
+    # one small-data LoRA recipe can land far apart — so the seed is filled and
+    # persisted like any other hyperparameter (feedback #121).
+    if training_cfg.get("seed") is None:
+        filled["seed"] = DEFAULT_SEED
     training_cfg.update(filled)
     return filled
 

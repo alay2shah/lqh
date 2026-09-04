@@ -27,6 +27,7 @@ from transformers import (
     TrainerControl,
     TrainerState,
     TrainingArguments,
+    set_seed,
 )
 from trl import DPOConfig, DPOTrainer
 
@@ -35,6 +36,7 @@ from lqh.train.data_utils import (
     load_preferences_parquet,
     split_train_eval,
 )
+from lqh.train.defaults import DEFAULT_SEED
 from lqh.train.dpo_metrics import (
     derive_effective_batch,
     find_best_held_out_iter,
@@ -701,6 +703,14 @@ def dpo_loop(run_dir: Path, config: dict[str, Any]) -> None:
     interrupted = False
     early_stopped = False
     interruption_error: str | None = None
+
+    # TRL attaches the LoRA adapter inside DPOTrainer.__init__, before
+    # transformers' Trainer applies args.seed — so adapter init drew from an
+    # unseeded RNG and no two runs of one recipe started alike. Seeded once
+    # here, before the first iteration, rather than per iteration: the run is
+    # then reproducible end to end without resetting the rollout RNG each time.
+    # (feedback #121, same fix as sft.py)
+    set_seed(int(training_cfg.get("seed", DEFAULT_SEED)))
 
     completed_iterations = start_iteration
     cumulative_optimizer_steps = 0

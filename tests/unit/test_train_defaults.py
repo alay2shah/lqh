@@ -341,22 +341,24 @@ def test_fill_missing_uses_the_module_not_a_read_site_literal():
     known-bad rate while recording nothing at all."""
     cfg: dict = {}
     filled = defaults.fill_missing_hyperparameters(cfg, run_type="sft", lora=True)
-    assert filled == {"learning_rate": 1e-4, "num_epochs": 3}
+    assert filled == {
+        "learning_rate": 1e-4, "num_epochs": 3, "seed": defaults.DEFAULT_SEED,
+    }
     assert cfg == filled  # written in place, so lineage/config see it
 
 
 def test_fill_missing_respects_a_complete_config():
     """An empty return is the caller's signal to leave the config file alone."""
-    cfg = {"learning_rate": 7e-5, "num_epochs": 1}
+    cfg = {"learning_rate": 7e-5, "num_epochs": 1, "seed": 3}
     assert defaults.fill_missing_hyperparameters(cfg, run_type="sft") == {}
-    assert cfg == {"learning_rate": 7e-5, "num_epochs": 1}
+    assert cfg == {"learning_rate": 7e-5, "num_epochs": 1, "seed": 3}
 
 
 def test_fill_missing_treats_explicit_null_as_missing():
     """A hand-written `"learning_rate": null` would reach HF Trainer as None."""
-    cfg: dict = {"learning_rate": None, "num_epochs": 2}
+    cfg: dict = {"learning_rate": None, "num_epochs": 2, "seed": None}
     filled = defaults.fill_missing_hyperparameters(cfg, run_type="sft", lora=True)
-    assert filled == {"learning_rate": 1e-4}
+    assert filled == {"learning_rate": 1e-4, "seed": defaults.DEFAULT_SEED}
     assert cfg["num_epochs"] == 2
 
 
@@ -373,8 +375,20 @@ def test_fill_missing_never_gives_dpo_an_epoch_count():
     """DPO is bounded by num_iterations; an epoch count there is meaningless."""
     cfg: dict = {}
     filled = defaults.fill_missing_hyperparameters(cfg, run_type="on_policy_dpo")
-    assert filled == {"learning_rate": 1e-6}
+    assert filled == {"learning_rate": 1e-6, "seed": defaults.DEFAULT_SEED}
     assert "num_epochs" not in cfg
+
+
+def test_fill_missing_records_the_seed_so_a_run_can_be_repeated():
+    """The seed is a hyperparameter like any other: filled, persisted with the
+    config and carried into a checkpoint's lineage (feedback #121)."""
+    cfg: dict = {"learning_rate": 1e-4, "num_epochs": 3}
+    assert defaults.fill_missing_hyperparameters(cfg, run_type="sft") == {
+        "seed": defaults.DEFAULT_SEED
+    }
+    kept = {"learning_rate": 1e-4, "num_epochs": 3, "seed": 0}
+    assert defaults.fill_missing_hyperparameters(kept, run_type="sft") == {}
+    assert kept["seed"] == 0
 
 
 def test_provenance_is_recorded():

@@ -488,6 +488,17 @@ class TestTrainingHealthBlock:
             "eval_loss 2.51 · token_acc 54% · lr 2.0e-04"
         ]
 
+    def test_reports_the_seed_the_run_used(self, tmp_path: Path) -> None:
+        """Replicates of one recipe can land far apart, so reading the score
+        means knowing which draw produced it (feedback #121)."""
+        from lqh.tools.handlers import _format_training_health_block
+
+        self._config(tmp_path, {"learning_rate": 2e-4, "seed": 7})
+        self._history(tmp_path, [{"step": 60, "loss": 2.25}])
+        assert _format_training_health_block(tmp_path) == [
+            "  Training health: 60 steps · loss 2.25 · lr 2.0e-04 · seed 7"
+        ]
+
     def test_warns_when_the_run_took_too_few_steps(self, tmp_path: Path) -> None:
         """The 21-step run that read as 'the dataset is bad'."""
         from lqh.tools.handlers import _format_training_health_block

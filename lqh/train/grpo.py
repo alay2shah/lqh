@@ -35,6 +35,7 @@ from transformers import (
     TrainerControl,
     TrainerState,
     TrainingArguments,
+    set_seed,
 )
 from trl import GRPOConfig, GRPOTrainer
 
@@ -50,6 +51,7 @@ from lqh.train.data_utils import (
     load_chatml_datasets_with_tools,
 )
 from lqh.train.defaults import (
+    DEFAULT_SEED,
     GRPO_BETA,
     GRPO_BETA_CONTINUATION,
     GRPO_LOSS_TYPE,
@@ -504,6 +506,10 @@ def grpo_loop(run_dir: Path, config: dict[str, Any]) -> None:
     }
     if peft_config is not None:
         trainer_kwargs["peft_config"] = peft_config
+    # TRL attaches the LoRA adapter inside GRPOTrainer.__init__, before
+    # transformers' Trainer applies args.seed (feedback #121, same fix as
+    # sft.py).
+    set_seed(int(training_cfg.get("seed", DEFAULT_SEED)))
     trainer = GRPOTrainer(**trainer_kwargs)
 
     print("Starting GRPO training...")

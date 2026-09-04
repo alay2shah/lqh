@@ -460,6 +460,7 @@ def sft_module(monkeypatch: pytest.MonkeyPatch):  # noqa: ANN201
         TrainerControl=type("TrainerControl", (), {}),
         TrainerState=type("TrainerState", (), {}),
         TrainingArguments=type("TrainingArguments", (), {}),
+        set_seed=lambda *a, **k: None,
     )
     stub(
         "trl",
