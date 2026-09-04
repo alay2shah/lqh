@@ -393,9 +393,13 @@ def run_inference_sglang(run_dir: Path, config: dict) -> None:
             ),
             force=True,
         )
+        # Name the decoding protocol in the log the reader quotes back:
+        # an eval that ran free-form where a schema was expected is
+        # otherwise indistinguishable from one that ran constrained.
         print(
             f"Generating {len(pending)}/{total} samples "
-            f"(concurrency {concurrency}, greedy, max_tokens {max_new_tokens})"
+            f"(concurrency {concurrency}, greedy, max_tokens {max_new_tokens}, "
+            f"{'JSON-schema constrained' if response_format else 'UNCONSTRAINED — no response_format'})"
         )
         _run_generation(
             server=server,

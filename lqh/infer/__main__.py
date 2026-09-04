@@ -414,6 +414,10 @@ def _run_inference_hf(run_dir: Path, config: dict) -> None:
             f"  JSON-schema constrained decoding enabled "
             f"(keys: {list(inner_schema.get('properties', {}).keys())})"
         )
+    else:
+        # Say so too — silence here reads as "constrained" to anyone
+        # scanning the log of an eval that was meant to be schema-bound.
+        print("  UNCONSTRAINED decoding — no response_format in the config")
 
     has_any_tools = any(t is not None for t in tools_per_sample)
     if has_any_tools:

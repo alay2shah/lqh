@@ -7362,6 +7362,7 @@ async def handle_eval_hf_model(
     training_method: str = "lora",
     base_model: str | None = None,
     system_prompt_path: str | None = None,
+    response_format_path: str | None = None,
     judge_size: str = "small",
     run_name: str | None = None,
     max_new_tokens: int = 4096,
@@ -7437,7 +7438,7 @@ async def handle_eval_hf_model(
         system_prompt, schema_dict = _resolve_eval_extras(
             project_dir,
             system_prompt_path=system_prompt_path,
-            response_format_path=None,
+            response_format_path=response_format_path,
         )
     except FileNotFoundError as e:
         return ToolResult.fail("not_found", f"Error: {e}")
@@ -7483,6 +7484,24 @@ async def handle_eval_hf_model(
             "validation",
             f"Error: this model fits no supported GPU — "
             f"{plan.get('no_fit_reason') or 'no fitting GPU available'}",
+        )
+
+    # Name the decoding protocol the job will actually run under. A
+    # schema reaches the sandbox only when one was passed or
+    # auto-discovered, and an eval that silently falls back to free-form
+    # decoding scores a model on output it was never asked to produce —
+    # so it is stated on the consent prompt (before the GPU spends) and
+    # again on the submit confirmation. Truthiness, not `is not None`:
+    # an empty schema reaches the engines as no constraint at all.
+    if schema_dict:
+        decoding_line = (
+            f"  Decode:  JSON-schema constrained "
+            f"({response_format_path or 'auto-discovered next to the system prompt'})\n"
+        )
+    else:
+        decoding_line = (
+            "  Decode:  UNCONSTRAINED — no JSON schema; pass "
+            "response_format_path to constrain output\n"
         )
 
     # Consent gate — GPU wall-clock spend needs the user's sign-off
@@ -7536,6 +7555,7 @@ async def handle_eval_hf_model(
                 + ")\n"
                 f"  Eval:    {num_samples} samples, judge:{judge_size}, "
                 f"max {max_new_tokens} tokens/sample\n"
+                + decoding_line
                 + compute_line
                 + _eval_hf_disclosure(project_dir)
                 + "Submit the cloud eval?"
@@ -7659,6 +7679,7 @@ async def handle_eval_hf_model(
             + (f" (base {base_model})" if training_method == 'lora' else "")
             + f"\n"
             f"  Judge:   judge:{judge_size}\n"
+            + decoding_line
             + compute_line
             + f"  Job ID:  {job_id}\n\n"
             f"Use training_status to monitor; eval_result.json lands "

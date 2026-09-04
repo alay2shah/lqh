@@ -2020,6 +2020,18 @@ def _build_all_tools(*, auto_mode: bool = False) -> list[dict]:
                             "<task>.schema.json for constrained decoding."
                         ),
                     },
+                    "response_format_path": {
+                        "type": "string",
+                        "description": (
+                            "Relative path to a JSON-schema file used to "
+                            "constrain decoding on the eval GPU "
+                            "(e.g. 'prompts/translation.schema.json'). If "
+                            "omitted but system_prompt_path is set, "
+                            "auto-discovers prompts/<task>.schema.json. With "
+                            "neither, generation is UNCONSTRAINED — the "
+                            "submit confirmation says which of the two ran."
+                        ),
+                    },
                     "judge_size": {
                         "type": "string",
                         "enum": ["small", "medium", "large"],

@@ -623,6 +623,137 @@ def test_eval_hf_downloads_the_artifact_instead_of_hf(tmp_path, monkeypatch) -> 
 
 
 # ---------------------------------------------------------------------------
+# eval_hf_model handler: constrained decoding (feedback #120)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_eval_hf_response_format_path_reaches_the_sandbox(tmp_path, monkeypatch) -> None:
+    """A schema asked for explicitly must ride the job config — it used
+    to be swallowed as an unknown kwarg, and the eval ran free-form."""
+    from lqh.remote.cloud import CloudBackend
+    from lqh.tools.handlers import handle_eval_hf_model
+    from lqh.tools.permissions import PermissionContext
+
+    submitted: dict = {}
+
+    async def fake_submit(self, run_dir, config, *, module="lqh.train",
+                          telemetry_workflow_id=None, **_kw):
+        submitted["config"] = config
+        return "job-10"
+
+    async def failing_snapshot(self, job_id):
+        raise RuntimeError("backend unreachable")
+
+    monkeypatch.setattr(CloudBackend, "submit_run", fake_submit)
+    monkeypatch.setattr(CloudBackend, "job_snapshot", failing_snapshot)
+    monkeypatch.setattr(CloudBackend, "plan_job", _plan_unavailable)
+    project = _eval_project(tmp_path)
+    (project / "prompts").mkdir()
+    schema = {"type": "object", "properties": {"diagnosis": {"type": "string"}}}
+    (project / "prompts" / "dx.schema.json").write_text(json.dumps(schema))
+
+    result = await handle_eval_hf_model(
+        project, repo="org/model", eval_dataset="evals/x",
+        scorer="scorers/x.md", training_method="full",
+        response_format_path="prompts/dx.schema.json",
+        _permissions=PermissionContext.granting("cloud_eval_hf"),
+    )
+    assert "Cloud eval submitted" in result.content
+    assert submitted["config"]["response_format"] == schema
+    # The effective decoding protocol is stated at submit time.
+    assert "JSON-schema constrained" in result.content
+    assert "prompts/dx.schema.json" in result.content
+
+
+@pytest.mark.asyncio
+async def test_eval_hf_says_when_decoding_is_unconstrained(tmp_path, monkeypatch) -> None:
+    from lqh.remote.cloud import CloudBackend
+    from lqh.tools.handlers import handle_eval_hf_model
+    from lqh.tools.permissions import PermissionContext
+
+    submitted: dict = {}
+
+    async def fake_submit(self, run_dir, config, *, module="lqh.train",
+                          telemetry_workflow_id=None, **_kw):
+        submitted["config"] = config
+        return "job-11"
+
+    async def failing_snapshot(self, job_id):
+        raise RuntimeError("backend unreachable")
+
+    monkeypatch.setattr(CloudBackend, "submit_run", fake_submit)
+    monkeypatch.setattr(CloudBackend, "job_snapshot", failing_snapshot)
+    monkeypatch.setattr(CloudBackend, "plan_job", _plan_unavailable)
+    project = _eval_project(tmp_path)
+
+    result = await handle_eval_hf_model(
+        project, repo="org/model", eval_dataset="evals/x",
+        scorer="scorers/x.md", training_method="full",
+        _permissions=PermissionContext.granting("cloud_eval_hf"),
+    )
+    assert "Cloud eval submitted" in result.content
+    assert "response_format" not in submitted["config"]
+    assert "UNCONSTRAINED" in result.content
+
+
+@pytest.mark.asyncio
+async def test_eval_hf_consent_names_the_decoding_protocol(tmp_path, monkeypatch) -> None:
+    """The consent prompt is the last surface before the GPU spends, so
+    an eval about to run free-form has to say so there."""
+    from lqh.remote.cloud import CloudBackend
+    from lqh.tools.handlers import handle_eval_hf_model
+
+    monkeypatch.setattr(CloudBackend, "plan_job", _plan_unavailable)
+    monkeypatch.setattr("lqh.tools.handlers._fetch_eval_hf_rate_usd", _none)
+    project = _eval_project(tmp_path)
+    result = await handle_eval_hf_model(
+        project, repo="org/model", eval_dataset="evals/x",
+        scorer="scorers/x.md", training_method="full",
+    )
+    assert result.content == "PERMISSION_REQUIRED"
+    assert "UNCONSTRAINED" in (result.question or "")
+
+
+@pytest.mark.asyncio
+async def test_eval_hf_empty_schema_reported_as_unconstrained(tmp_path, monkeypatch) -> None:
+    """An empty schema constrains nothing in either engine (both test
+    ``if response_format``), so it must not be reported as constrained."""
+    from lqh.remote.cloud import CloudBackend
+    from lqh.tools.handlers import handle_eval_hf_model
+
+    monkeypatch.setattr(CloudBackend, "plan_job", _plan_unavailable)
+    monkeypatch.setattr("lqh.tools.handlers._fetch_eval_hf_rate_usd", _none)
+    project = _eval_project(tmp_path)
+    (project / "prompts").mkdir()
+    (project / "prompts" / "empty.schema.json").write_text("{}")
+    result = await handle_eval_hf_model(
+        project, repo="org/model", eval_dataset="evals/x",
+        scorer="scorers/x.md", training_method="full",
+        response_format_path="prompts/empty.schema.json",
+    )
+    assert result.content == "PERMISSION_REQUIRED"
+    assert "UNCONSTRAINED" in (result.question or "")
+
+
+@pytest.mark.asyncio
+async def test_eval_hf_missing_schema_file_fails_before_spending(tmp_path, monkeypatch) -> None:
+    from lqh.remote.cloud import CloudBackend
+    from lqh.tools.handlers import handle_eval_hf_model
+    from lqh.tools.permissions import PermissionContext
+
+    monkeypatch.setattr(CloudBackend, "plan_job", _plan_unavailable)
+    project = _eval_project(tmp_path)
+    result = await handle_eval_hf_model(
+        project, repo="org/model", eval_dataset="evals/x",
+        scorer="scorers/x.md", training_method="full",
+        response_format_path="prompts/nope.schema.json",
+        _permissions=PermissionContext.granting("cloud_eval_hf"),
+    )
+    assert "does not exist" in result.content
+
+
+# ---------------------------------------------------------------------------
 # eval_hf_model handler: LQH checkpoint artifact source
 # ---------------------------------------------------------------------------
 
