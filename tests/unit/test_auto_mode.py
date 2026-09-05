@@ -144,6 +144,21 @@ class TestAutoModeToolGating:
         assert "do not repeatedly poll" in description
         assert "wake automatically" in description
 
+    def test_agent_is_told_the_status_bar_shows_live_progress(self) -> None:
+        # Feedback #141: users were told to "ask me anytime" for progress
+        # because nothing told the agent the TUI status bar already shows
+        # step count / percent / ETA for running jobs.
+        from lqh.agent import SYSTEM_PROMPT
+
+        training_status = next(
+            t for t in get_all_tools() if t["function"]["name"] == "training_status"
+        )
+        description = training_status["function"]["description"]
+        assert "status bar" in description
+        assert "ETA" in description
+        assert "### Following a running job" in SYSTEM_PROMPT
+        assert "ETA" in SYSTEM_PROMPT
+
 
 # ---------------------------------------------------------------------------
 # exit_auto_mode + set_auto_stage handlers

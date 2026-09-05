@@ -6094,7 +6094,8 @@ async def _execute_start_training_remote(
                 + (f"  Data:    {data_line}\n" if data_line else "")
                 + (compute_line or "")
                 + f"  Job ID:  {job_id}\n\n"
-                f"Backend: LQH Cloud (api.lqh.ai). Use training_status to monitor progress."
+                f"Backend: LQH Cloud (api.lqh.ai). Live progress and ETA show in the "
+                f"status bar; use training_status for details."
                 + _submit_advisories(backend)
             ),
             workflow_launched=True,
@@ -6153,7 +6154,8 @@ async def _execute_start_training_remote(
             + f"  Job ID:   {job_id}\n"
             f"  Host:     {remote_config.hostname}\n"
             f"  Dir:      {remote_run_dir}\n\n"
-            f"Use training_status(run_name='{run_name}') to monitor progress."
+            f"Live progress and ETA show in the status bar; use "
+            f"training_status(run_name='{run_name}') for details."
         ),
         workflow_launched=True,
     )
@@ -6206,7 +6208,8 @@ async def _execute_start_training(
             + (f"  Data:   {data_line}\n" if data_line else "")
             + f"  PID:    {pid}\n"
             f"  Dir:    runs/{run_name}/\n\n"
-            f"Use training_status to monitor progress."
+            f"Live progress and ETA show in the status bar; use "
+            f"training_status for details."
         ),
         workflow_launched=True,
     )
