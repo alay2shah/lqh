@@ -1224,7 +1224,14 @@ class LqhApp:
         await self._telemetry.run_deferred(self._telemetry.record_user_turn, "message")
 
         self._lock_input()
-        await self._emit(render_user_message(text))
+        if text.startswith("[System:"):
+            # A background-job notice (jobs.py) arrives through the same
+            # input queue as typed text so the agent reacts to it as a turn,
+            # but it is the harness speaking, not the user: printing it under
+            # "You" made it look like the user had sent it (feedback #140).
+            await self._emit(render_system_message(text))
+        else:
+            await self._emit(render_user_message(text))
 
         try:
             if self._agent:

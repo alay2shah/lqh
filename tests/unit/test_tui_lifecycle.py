@@ -462,3 +462,30 @@ async def test_wait_for_results_respects_grace_timeout(
     monkeypatch.setattr("lqh.jobs.SCORING_GRACE_SEC", 0.1)
     # Must return despite eval_result.json never appearing.
     await asyncio.wait_for(app._supervisor.wait_for_results(["eval_1"]), timeout=1.0)
+
+
+async def test_job_notice_is_not_rendered_as_user_message(app: LqhApp) -> None:
+    # A [System: ...] completion notice reaches _handle_message through the
+    # input queue like typed text, but it must not print under "👤 You"
+    # (feedback #140). It still drives an agent turn.
+    agent = _FakeAgent()
+    agent.fail_process = False
+    app._agent = agent  # type: ignore[assignment]
+    notice = "[System: training run run_1 completed successfully.]"
+
+    await asyncio.wait_for(app._handle_message(notice), timeout=2)
+
+    assert agent.process_calls == [notice]
+    rendered = "\n".join(app._emitted)  # type: ignore[attr-defined]
+    assert "👤 You" not in rendered
+    assert "run_1 completed" in rendered
+
+
+async def test_typed_message_is_still_rendered_as_user_message(app: LqhApp) -> None:
+    agent = _FakeAgent()
+    agent.fail_process = False
+    app._agent = agent  # type: ignore[assignment]
+
+    await asyncio.wait_for(app._handle_message("train the model"), timeout=2)
+
+    assert "👤 You" in "\n".join(app._emitted)  # type: ignore[attr-defined]
