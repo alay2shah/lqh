@@ -1244,3 +1244,158 @@ def test_finalize_predictions_omits_reference_column_when_unlabelled(
 class _NullReporter:
     def update(self, **kwargs: object) -> None:
         pass
+
+
+# ---------------------------------------------------------------------------
+# A guessed LiquidAI/ repo id is refused before any cloud job is submitted
+# (feedback #138: two paid evals died at snapshot_download with a 404).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("repo", "suggested"),
+    [
+        ("LiquidAI/LFM2.5-350M-Instruct", "LiquidAI/LFM2.5-350M"),
+        ("LiquidAI/LFM2.5-230M-Instruct", "LiquidAI/LFM2.5-230M"),
+    ],
+)
+def test_liquid_catalog_suggestions_names_the_intended_id(repo, suggested) -> None:
+    from lqh.models import liquid_catalog_suggestions
+
+    assert suggested in (liquid_catalog_suggestions(repo) or [])
+
+
+@pytest.mark.parametrize(
+    "repo",
+    [
+        "LiquidAI/LFM2.5-350M",
+        "liquidai/lfm2.5-1.2b-instruct",  # Hub ids are case-insensitive
+        "Qwen/Qwen3.5-3B-Instruct",       # not Liquid — the catalog can't judge it
+        "someuser/my-lora",
+        None,
+        "",
+    ],
+)
+def test_liquid_catalog_suggestions_skips_catalog_and_foreign_repos(repo) -> None:
+    from lqh.models import liquid_catalog_suggestions
+
+    assert liquid_catalog_suggestions(repo) is None
+
+
+@pytest.mark.asyncio
+async def test_eval_hf_missing_liquid_repo_rejected_before_plan_and_consent(
+    tmp_path, monkeypatch,
+) -> None:
+    from lqh.remote.cloud import CloudBackend
+    from lqh.tools.handlers import handle_eval_hf_model
+
+    async def fake_plan(self, kind, *, base_model=None, config=None):
+        raise AssertionError("planner must not be reached for a missing Liquid repo")
+
+    looked_up: list[tuple[str, str]] = []
+
+    def fake_missing(repo, revision):
+        looked_up.append((repo, revision))
+        return True
+
+    monkeypatch.setattr(CloudBackend, "plan_job", fake_plan)
+    monkeypatch.setattr("lqh.tools.handlers._hf_repo_missing", fake_missing)
+    project = _eval_project(tmp_path)
+    result = await handle_eval_hf_model(
+        project, repo="LiquidAI/LFM2.5-350M-Instruct", eval_dataset="evals/x",
+        scorer="scorers/x.md", training_method="full",
+    )
+    assert looked_up == [("LiquidAI/LFM2.5-350M-Instruct", "main")]
+    assert result.content != "PERMISSION_REQUIRED"
+    assert not result.requires_user_input
+    assert "LiquidAI/LFM2.5-350M-Instruct" in result.content
+    assert "LiquidAI/LFM2.5-350M" in result.content
+    assert not (project / "runs").exists()
+
+
+@pytest.mark.asyncio
+async def test_eval_hf_real_liquid_repo_outside_catalog_still_allowed(
+    tmp_path, monkeypatch,
+) -> None:
+    """An older LFM2 release exists on the Hub but not in the catalog —
+    the Hub says so, and the eval proceeds to the consent prompt."""
+    from lqh.remote.cloud import CloudBackend
+    from lqh.tools.handlers import handle_eval_hf_model
+
+    monkeypatch.setattr(CloudBackend, "plan_job", _plan_unavailable)
+    monkeypatch.setattr("lqh.tools.handlers._fetch_eval_hf_rate_usd", _none)
+    monkeypatch.setattr("lqh.tools.handlers._hf_repo_missing", lambda repo, rev: False)
+    project = _eval_project(tmp_path)
+    result = await handle_eval_hf_model(
+        project, repo="LiquidAI/LFM2-1.2B", eval_dataset="evals/x",
+        scorer="scorers/x.md", training_method="full",
+    )
+    assert result.content == "PERMISSION_REQUIRED"
+
+
+@pytest.mark.asyncio
+async def test_eval_hf_foreign_repo_never_consults_the_hub(tmp_path, monkeypatch) -> None:
+    from lqh.remote.cloud import CloudBackend
+    from lqh.tools.handlers import handle_eval_hf_model
+
+    def boom(repo, revision):
+        raise AssertionError("non-Liquid repos are not checked")
+
+    monkeypatch.setattr(CloudBackend, "plan_job", _plan_unavailable)
+    monkeypatch.setattr("lqh.tools.handlers._fetch_eval_hf_rate_usd", _none)
+    monkeypatch.setattr("lqh.tools.handlers._hf_repo_missing", boom)
+    project = _eval_project(tmp_path)
+    result = await handle_eval_hf_model(
+        project, repo="org/model", eval_dataset="evals/x",
+        scorer="scorers/x.md", training_method="full",
+    )
+    assert result.content == "PERMISSION_REQUIRED"
+
+
+@pytest.mark.asyncio
+async def test_eval_hf_lora_guessed_liquid_base_model_rejected(tmp_path, monkeypatch) -> None:
+    from lqh.remote.cloud import CloudBackend
+    from lqh.tools.handlers import handle_eval_hf_model
+
+    monkeypatch.setattr(CloudBackend, "plan_job", _plan_unavailable)
+    monkeypatch.setattr("lqh.tools.handlers._hf_repo_missing", lambda repo, rev: True)
+    project = _eval_project(tmp_path)
+    result = await handle_eval_hf_model(
+        project, repo="someuser/my-lora", base_model="LiquidAI/LFM2.5-350M-Instruct",
+        eval_dataset="evals/x", scorer="scorers/x.md", training_method="lora",
+    )
+    assert result.content != "PERMISSION_REQUIRED"
+    assert "LiquidAI/LFM2.5-350M-Instruct" in result.content
+    assert "LiquidAI/LFM2.5-350M" in result.content
+
+
+def test_hf_repo_missing_only_on_a_definitive_404(monkeypatch) -> None:
+    """A 404 refuses; anything else (offline, 401 from a stale token, Hub
+    hiccup) must fail open — a real off-catalog Liquid repo is never
+    blocked by network trouble."""
+    from huggingface_hub import HfApi
+    from huggingface_hub.errors import RepositoryNotFoundError
+    from lqh.tools.handlers import _hf_repo_missing
+
+    monkeypatch.setattr("lqh.hf_token.local_hf_token", lambda project_dir: None)
+
+    import httpx
+
+    resp_404 = httpx.Response(
+        404, request=httpx.Request("GET", "https://huggingface.co/api/models/x"),
+    )
+
+    def not_found(self, repo_id, **kwargs):
+        raise RepositoryNotFoundError("404 Client Error", response=resp_404)
+
+    monkeypatch.setattr(HfApi, "model_info", not_found)
+    assert _hf_repo_missing("LiquidAI/LFM2.5-350M-Instruct", "main") is True
+
+    def hiccup(self, repo_id, **kwargs):
+        raise ConnectionError("offline")
+
+    monkeypatch.setattr(HfApi, "model_info", hiccup)
+    assert _hf_repo_missing("LiquidAI/LFM2.5-350M-Instruct", "main") is False
+
+    monkeypatch.setattr(HfApi, "model_info", lambda self, repo_id, **kwargs: object())
+    assert _hf_repo_missing("LiquidAI/LFM2-1.2B", "main") is False

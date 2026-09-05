@@ -27,6 +27,7 @@ __all__ = [
     "SIZE_RECOMMENDATION",
     "is_liquid_model_name",
     "is_vlm_model_name",
+    "liquid_catalog_suggestions",
     "format_catalog",
     "model_param_count",
     "parse_inference_budget",
@@ -124,6 +125,32 @@ def is_liquid_model_name(name: str | None) -> bool:
         if n == m.id.lower() or n == m.hf_id.lower():
             return True
     return n.startswith("liquidai/") or n.startswith("lfm")
+
+
+def liquid_catalog_suggestions(repo: str | None) -> list[str] | None:
+    """For a ``LiquidAI/`` HF id that is NOT in the catalog, return the
+    closest catalog ids (possibly empty); None when *repo* is not a Liquid
+    id or is a known catalog entry.
+
+    Liquid's own naming is inconsistent (``LFM2.5-1.2B-Instruct`` but
+    ``LFM2.5-350M`` with no suffix), so the agent routinely guesses an
+    ``-Instruct`` id that does not exist and the sandbox only finds out at
+    ``snapshot_download`` — a paid cloud job that dies seconds in with a
+    404 (feedback #138). Callers confirm with the Hub before refusing: a
+    real Liquid repo missing from this list (older LFM2, a new release)
+    must still be evaluable.
+    """
+    if not repo:
+        return None
+    n = repo.strip().lower()
+    if not n.startswith("liquidai/"):
+        return None
+    known = {m.hf_id.lower(): m.hf_id for m in LIQUID_MODELS}
+    if n in known:
+        return None
+    import difflib
+
+    return [known[c] for c in difflib.get_close_matches(n, list(known), n=3, cutoff=0.6)]
 
 
 def is_vlm_model_name(name: str | None) -> bool:

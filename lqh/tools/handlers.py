@@ -7536,6 +7536,48 @@ async def handle_start_local_eval(
     )
 
 
+def _missing_liquid_repo_error(repo: str | None, revision: str) -> str | None:
+    """Error text when *repo* is a ``LiquidAI/`` id that is not in the
+    catalog AND the Hub confirms it does not exist; None otherwise.
+
+    Liquid's repos are public, so an unauthenticated lookup is definitive.
+    Any other failure (offline, Hub down, rate limit) is not a 404 — fail
+    open and let the sandbox find out, as it did before this check.
+    """
+    from lqh.models import liquid_catalog_suggestions
+
+    suggestions = liquid_catalog_suggestions(repo)
+    if suggestions is None or not _hf_repo_missing(repo, revision):
+        return None
+    hint = (
+        " Did you mean: " + ", ".join(suggestions) + "?"
+        if suggestions
+        else " Call list_models for the catalog."
+    )
+    return (
+        f"Error: {repo.strip()!r} does not exist on HuggingFace (404) — the "
+        f"cloud job would fail at checkpoint download.{hint}"
+    )
+
+
+def _hf_repo_missing(repo: str, revision: str) -> bool:
+    """True only when the Hub definitively says the model repo (or the
+    revision) is not there. Network trouble reads as "not missing"."""
+    from huggingface_hub import HfApi
+    from huggingface_hub.errors import RepositoryNotFoundError, RevisionNotFoundError
+    from lqh.hf_token import local_hf_token
+
+    try:
+        HfApi(token=local_hf_token(None)).model_info(
+            repo.strip(), revision=revision or "main", timeout=10,
+        )
+    except (RepositoryNotFoundError, RevisionNotFoundError):
+        return True
+    except Exception:  # noqa: BLE001 — offline / Hub hiccup: fail open
+        return False
+    return False
+
+
 async def handle_eval_hf_model(
     project_dir: Path,
     *,
@@ -7585,6 +7627,13 @@ async def handle_eval_hf_model(
             "validation",
             f"Error: training_method must be 'lora' or 'full', got {training_method!r}",
         )
+    # A guessed LiquidAI/ id (an -Instruct suffix the catalog doesn't have)
+    # is the common way a cloud eval dies seconds in with a 404 at
+    # snapshot_download — a billed failure plus a failure notification for
+    # nothing. Refuse it here, before consent and submit (feedback #138).
+    for candidate in (repo, base_model if training_method == "lora" else None):
+        if repo_err := _missing_liquid_repo_error(candidate, revision if candidate == repo else "main"):
+            return ToolResult.fail("validation", repo_err)
     if training_method == "lora" and not base_model:
         return ToolResult.fail(
             "validation",
