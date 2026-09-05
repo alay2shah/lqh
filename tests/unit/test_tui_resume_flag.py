@@ -584,3 +584,65 @@ async def test_feedback_without_text_during_turn_is_kept_with_hint(
     assert buffer.text == "/feedback"
     assert app._input_queue.empty()
     assert "/feedback <your message>" in _plain(app._emitted)
+
+
+def _cut_off_session(project_dir: Path) -> Session:
+    """A transcript whose process died between a tool call and its result."""
+    session = Session.create(project_dir)
+    session.add_message({"role": "user", "content": "run the baselines"})
+    session.add_message({
+        "role": "assistant",
+        "content": "Running both candidates:",
+        "tool_calls": [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {
+                    "name": "eval_hf_model",
+                    "arguments": '{"run_name": "baseline_350m_zero_shot"}',
+                },
+            },
+            {
+                "id": "call_2",
+                "type": "function",
+                "function": {"name": "eval_hf_model", "arguments": "{not json"},
+            },
+        ],
+    })
+    return session
+
+
+async def test_resume_shows_and_repairs_a_cut_off_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prior = _cut_off_session(tmp_path)
+    app = _app(tmp_path, monkeypatch, prior.id)
+
+    assert await app._resume_requested_session() is True
+
+    text = _plain(app._emitted)
+    # The calls the session died on are replayed like the live session
+    # printed them, followed by what happened and what to do.
+    assert "eval_hf_model" in text
+    assert "run_name: baseline_350m_zero_shot" in text
+    assert "arguments: {not json" in text
+    assert "previous session ended while the tool call(s) above" in text
+    # Both calls are answered so the next request is API-valid, and the
+    # repair is durable across a further resume.
+    tail = app._session.messages[-2:]
+    assert [m["role"] for m in tail] == ["tool", "tool"]
+    assert {m["tool_call_id"] for m in tail} == {"call_1", "call_2"}
+    reloaded = Session.load(tmp_path, prior.id)
+    assert reloaded.messages[-1]["tool_call_id"] == "call_2"
+
+
+async def test_resume_of_a_clean_transcript_prints_no_cut_off_notice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prior = _prior_session(tmp_path)
+    app = _app(tmp_path, monkeypatch, prior.id)
+
+    assert await app._resume_requested_session() is True
+
+    assert "previous session ended" not in _plain(app._emitted)
+    assert [m["role"] for m in app._session.messages] == ["user", "assistant"]

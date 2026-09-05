@@ -82,6 +82,32 @@ def _is_other_option(option: str) -> bool:
     """
     return option.strip().lower().startswith("other")
 
+
+def _unanswered_tool_calls(messages: list[dict]) -> list[dict]:
+    """Tool calls of the last assistant turn that never got a tool result.
+
+    Read-only twin of ``Agent.abort_turn``'s scan: walks back over trailing
+    tool results / system injections to the last assistant message and
+    returns its ``tool_calls`` entries no later ``tool`` message answers.
+    Empty when the transcript ends cleanly.
+    """
+    for i in range(len(messages) - 1, -1, -1):
+        role = messages[i].get("role")
+        if role in ("tool", "system"):
+            continue
+        if role != "assistant":
+            return []
+        answered = {
+            m.get("tool_call_id")
+            for m in messages[i + 1:]
+            if m.get("role") == "tool"
+        }
+        return [
+            tc for tc in messages[i].get("tool_calls") or []
+            if tc.get("id") not in answered
+        ]
+    return []
+
 # Maximum rows the input area grows to before it scrolls internally.
 INPUT_MAX_LINES = 8
 
@@ -1942,6 +1968,45 @@ class LqhApp:
                 await self._emit(render_user_message(content))
             elif role == "assistant" and content:
                 await self._emit(render_agent_message(str(content)))
+        if not self._shutdown_requested:
+            await self._render_cut_off_turn()
+
+    async def _render_cut_off_turn(self) -> None:
+        """Show the tool calls a resumed transcript ends on, then repair them.
+
+        The replay above prints prose only, so a session whose process died
+        mid-turn (killed, closed terminal — a Ctrl+C repairs itself) resumed
+        to the assistant's last sentence and nothing else: the user could
+        not tell what had been running or whether it finished (feedback
+        #137). Print those calls the way the live session did, say what
+        happened, and answer them with the same synthetic results a
+        Ctrl+C writes, so the next request is accepted by the API instead
+        of rejected for unanswered tool calls.
+        """
+        if self._session is None:
+            return
+        unanswered = _unanswered_tool_calls(self._session.messages)
+        if not unanswered:
+            return
+        for call in unanswered:
+            function = call.get("function") or {}
+            raw_args = function.get("arguments")
+            args: object
+            try:
+                args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+            except ValueError:
+                args = raw_args
+            if not isinstance(args, dict):
+                args = {"arguments": args} if args else {}
+            await self._emit(render_tool_call(function.get("name") or "unknown", args))
+        await self._emit(render_system_message(
+            "⏸ The previous session ended while the tool call(s) above were "
+            "still running — they may or may not have completed. Send a "
+            'message (e.g. "continue") and the agent will check their state '
+            "and pick up from here."
+        ))
+        if self._agent is not None:
+            self._agent.abort_turn()
 
     def _adopt_session(self, session: Session) -> None:
         """Point the TUI and a fresh agent at ``session``."""
