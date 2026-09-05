@@ -198,10 +198,13 @@ prompting style, data format, etc. When ambiguous:
 - **Model size:** If the spec/user named a size, use it. Otherwise **start in
   the middle — the 1.2B model** — never an extreme. Then adapt from evidence: if
   the task proves very simple (strong zero-shot baseline, clean data) step down
-  toward 350M; if it proves too hard for the size (very poor zero-shot baseline,
-  or SFT plateaus well below target despite good data and a sane scorer) step up
-  to 2.6B or the 8B-A1B MoE. The zero-shot baseline score is your first signal
-  for where to land.
+  toward 350M; if it proves too hard for the size (very poor zero-shot baseline
+  at 1.2B or above, or SFT plateaus well below target despite good data and a
+  sane scorer) step up to 2.6B or the 8B-A1B MoE. The zero-shot baseline score
+  is your first signal for where to land — except for the 230M/350M, which
+  routinely score near the floor zero-shot (they can't follow a multi-rule
+  prompt) and still fine-tune well on narrow tasks. Judge those sizes by the
+  pilot SFT, never by the zero-shot baseline alone.
 - **Base vs. instruct checkpoint:** either works as the SFT base; at the large
   dataset sizes auto mode generates the gap is small, with a slight edge to the
   `-Base` checkpoint. Default to the instruct/no-suffix model unless you have a

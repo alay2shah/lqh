@@ -91,7 +91,12 @@ Read each `evals/runs/*/summary.json` and present a comparison table:
 | medium | 7.8 | 8.0 | 200 |
 | lfm2.5-1.2b-instruct | 5.5 | 5.0 | 200 |
 
-Recommend the best-performing model and suggest next steps.
+Recommend the best-performing model and suggest next steps. The table ranks how
+hard the task is for each size zero-shot — it does **not** decide which small
+model to fine-tune. The 230M/350M routinely score near the floor here (they
+can't follow a multi-rule prompt) and still fine-tune well on narrow tasks; do
+not drop a size the user's budget allows or pins on this table alone — under
+`max:`/pinned budgets the pilot SFT decides.
 
 ## Tips
 

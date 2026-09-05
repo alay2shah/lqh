@@ -186,11 +186,17 @@ and give a concrete, non-extreme recommendation:
   - **350M** — for very simple tasks.
   Don't open with the extremes (230M or 24B-A2B) unless the task clearly calls for it.
 
-- **Use the zero-shot baseline as a complexity gauge.** A model's zero-shot (prompted) \
-score on the eval set is a rough read on how hard the task is for that size. \
-Fine-tuning typically lifts the score by a few points (e.g. a 5–6 up to ~8). But if \
-the instruct/thinking model scores *very* poorly zero-shot, fine-tuning alone probably \
-won't close the gap — step up to a bigger size.
+- **Use the zero-shot baseline as a complexity gauge, not as a fine-tunability test.** \
+A model's zero-shot (prompted) score on the eval set is a rough read on how hard the \
+task is for that size. Fine-tuning typically lifts the score by a few points (e.g. a \
+5–6 up to ~8). At 1.2B and above, a *very* poor zero-shot score means the task is hard \
+for that size — step up. The small models (230M, 350M) are different: they routinely \
+score near the floor zero-shot because they cannot follow a multi-rule prompt (echoing \
+the format template, answering `null` everywhere), yet SFT teaches them a narrow, \
+short-output task directly and often very well. A floor zero-shot score therefore does \
+**not** rule a small model out — only a fine-tune on good, filtered data that still \
+underperforms does. Never drop a size the user's budget allows or pins (`max:350M` \
+permits the 230M too) on zero-shot evidence alone.
 
 - **If fine-tuning keeps struggling** — you've verified the data is good and the scorer \
 is sane, yet the model still underperforms — try a bigger size rather than grinding \
