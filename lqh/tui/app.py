@@ -69,7 +69,7 @@ logger = logging.getLogger(__name__)
 # matching the terminal's background is picked here, once, at startup.
 TUI_STYLE = Style.from_dict(active_palette().tui_style)
 
-OTHER_OPTION = "Other (press Enter to type your own answer)"
+OTHER_OPTION = "Other (Tab to type your own answer)"
 
 
 def _is_other_option(option: str) -> bool:
@@ -358,6 +358,26 @@ class LqhApp:
                 self._render_ask_user_options()
                 event.app.invalidate()
 
+        can_type_other = Condition(
+            lambda: self._ask_user_allow_other and bool(self._ask_user_options)
+        )
+
+        @kb.add("c-i", filter=is_ask_mode & can_type_other, eager=True)  # Tab
+        def _ask_tab(event):
+            """Tab jumps to the Other row and leaves the list up for typing.
+
+            Enter on that row swaps the list for a separate free-text prompt;
+            users asked for the form-like path instead — Tab into the row,
+            type inline with the options still visible, Enter to send.
+            """
+            try:
+                self._ask_user_selected = self._ask_user_options.index(OTHER_OPTION)
+            except ValueError:
+                return
+            self._ask_user_confirm_none = False
+            self._render_ask_user_options()
+            event.app.invalidate()
+
         # Slash-command autocomplete. The completer only fires on a
         # single-line "/word" prefix (and never in ask mode), so
         # these bindings cannot collide with the ask-mode arrows above.
@@ -593,10 +613,17 @@ class LqhApp:
         self._invalidate()
 
     def _on_input_text_changed(self, _buffer) -> None:
-        """Mirror typing into the multi-select "Other" row as it happens."""
-        if self._ask_user_options is not None and self._ask_user_multi_select:
+        """Mirror typing into the "Other" row as it happens."""
+        if self._ask_user_options is not None:
             if _buffer.text.strip():
                 self._ask_user_confirm_none = False
+                if not self._ask_user_multi_select and self._ask_user_allow_other:
+                    # Enter sends the typed text whatever row is highlighted,
+                    # so point the marker at the row that is actually answering.
+                    try:
+                        self._ask_user_selected = self._ask_user_options.index(OTHER_OPTION)
+                    except ValueError:
+                        pass
             self._render_ask_user_options()
 
     def _render_ask_user_options(self) -> None:
@@ -606,7 +633,7 @@ class LqhApp:
             return
 
         other_index = None
-        if self._ask_user_multi_select and self._ask_user_allow_other:
+        if self._ask_user_allow_other:
             try:
                 other_index = self._ask_user_options.index(OTHER_OPTION)
             except ValueError:

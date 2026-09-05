@@ -98,6 +98,7 @@ def _input_window(app: LqhApp):
 # Key sequences sent through the pipe input.
 ENTER = "\r"
 SPACE = " "
+TAB = "\t"
 DOWN = "\x1b[B"
 ALT_ENTER = "\x1b\r"
 CTRL_J = "\n"
@@ -354,6 +355,67 @@ class TestPromptSession:
         assert "Type your own answer" in str(seen["prompt"])
         assert res == "my own answer"
 
+    async def test_single_select_tab_types_inline_with_list_open(
+        self, app: LqhApp,
+    ) -> None:
+        """Tab jumps to the Other row; typing happens with the list still up.
+
+        The Enter path swaps the list for a separate prompt (feedback #135
+        called that a "new chat buffer"). Tab keeps the options on screen,
+        echoes the answer into the Other row, and Enter sends it.
+        """
+
+        seen: dict[str, object] = {}
+
+        def _after_tab(a: LqhApp) -> None:
+            seen["selected_after_tab"] = a._ask_user_selected
+            seen["options_after_tab"] = a._ask_user_options
+
+        def _while_typing(a: LqhApp) -> None:
+            seen["echo"] = a._managed_ansi
+            seen["options_while_typing"] = a._ask_user_options
+
+        res = await _drive_ask_user(
+            app,
+            ["alpha", "beta", OTHER_OPTION],
+            [
+                (TAB, _after_tab),
+                ("my own answer", _while_typing),
+                (ENTER, None),
+            ],
+            multi_select=False,
+            allow_other=True,
+        )
+        assert seen["selected_after_tab"] == 2
+        assert seen["options_after_tab"] is not None
+        assert seen["options_while_typing"] is not None
+        assert "Other: my own answer" in str(seen["echo"])
+        assert res == "my own answer"
+
+    async def test_multi_select_tab_jumps_to_other_row(self, app: LqhApp) -> None:
+        """Tab lands on the Other row with the ticks intact; typing rides along."""
+
+        seen: dict[str, object] = {}
+
+        def _after_tab(a: LqhApp) -> None:
+            seen["selected"] = a._ask_user_selected
+            seen["checked"] = set(a._ask_user_checked)
+
+        res = await _drive_ask_user(
+            app,
+            ["alpha", "beta", OTHER_OPTION],
+            [
+                (SPACE, None),  # tick alpha
+                (TAB, _after_tab),
+                ("my own answer", None),
+                (ENTER, None),
+            ],
+            allow_other=True,
+        )
+        assert seen["selected"] == 2
+        assert seen["checked"] == {0}
+        assert res == "alpha, my own answer"
+
     async def test_multi_select_space_on_other_opens_free_text(
         self, app: LqhApp,
     ) -> None:
@@ -395,7 +457,7 @@ class TestPromptSession:
             ["alpha", OTHER_OPTION], 0, checked=set(), allow_other=True, other_index=1,
         )
         assert f"[ ] {OTHER_OPTION}" in empty
-        assert "Enter on Other to type your own answer" in empty
+        assert "Tab: type your own answer" in empty
 
         typed = render_options(
             ["alpha", OTHER_OPTION],
@@ -408,6 +470,13 @@ class TestPromptSession:
         assert "[✓] Other: something else" in typed
         # Space is a space while typing, so it must not be advertised as toggle.
         assert "Space" not in typed
+
+    def test_single_select_render_echoes_typed_other(self, app: LqhApp) -> None:
+        """Radio mode mirrors the typed answer into the Other row too."""
+        out = render_options(
+            ["alpha", OTHER_OPTION], 1, allow_other=True, other_index=1, other_text="x",
+        )
+        assert "Other: x" in out
 
     def test_single_select_render_shows_navigation_hint(self, app: LqhApp) -> None:
         """Single-select mode must spell out how to answer (it had no hint before)."""

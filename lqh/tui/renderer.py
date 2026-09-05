@@ -345,22 +345,23 @@ def render_options(
     reminds the user that Space toggles options before they confirm an empty
     selection.
 
-    *other_index* marks the auto-appended "Other" row in multi-select mode. It
-    has no checkbox to toggle — it is filled by typing, either after picking it
-    or straight away — so it echoes whatever is currently in the input line
-    (*other_text*) and ticks itself once that is non-empty, otherwise the row
-    looks permanently unselectable.
+    *other_index* marks the auto-appended "Other" row. It is filled by typing
+    (Tab jumps to it; typing straight away works too) so in both modes it
+    echoes whatever is currently in the input line (*other_text*); in
+    multi-select it also ticks itself once that is non-empty, otherwise the
+    row looks permanently unselectable.
     """
     buf = StringIO()
     console = Console(
         file=buf, force_terminal=True, width=_display_width(width), color_system="truecolor"
     )
 
+    # Collapsed, not just stripped: the echo is a single row, so a
+    # newline in the answer must not split the option list.
+    typed = " ".join(other_text.split())
+
     if checked is not None:
         # Multi-select (checkbox) mode
-        # Collapsed, not just stripped: the echo is a single row, so a
-        # newline in the answer must not split the option list.
-        typed = " ".join(other_text.split())
         for i, opt in enumerate(options):
             if i == other_index:
                 mark = "✓" if typed else " "
@@ -396,7 +397,7 @@ def render_options(
                 # typing, and Enter then submits it together with the ticks.
                 hint = (
                     "    Space: toggle  Enter: confirm  ·  "
-                    "Enter on Other to type your own answer"
+                    "Tab: type your own answer"
                 )
             else:
                 hint = "    Space: toggle  Enter: confirm"
@@ -404,16 +405,17 @@ def render_options(
     else:
         # Single-select (radio) mode
         for i, opt in enumerate(options):
+            label = f"Other: {typed}" if i == other_index and typed else opt
             if i == selected:
-                console.print(Text(f"  ▶ {opt}", style="bold cyan"))
+                console.print(Text(f"  ▶ {label}", style="bold cyan"))
             else:
-                console.print(Text(f"    {opt}", style="dim"))
+                console.print(Text(f"    {label}", style="dim"))
         hint = "    ↑↓: navigate  Enter: select"
         if allow_other:
-            # Pick the "Other" row first, THEN type — users arriving from other
-            # agent consoles expect exactly that, and the older wording ("or
-            # just type") read as an instruction to type before choosing it.
-            hint += "  ·  pick Other to type your own answer"
+            # Tab moves to the "Other" row and the answer is typed inline with
+            # the list still on screen (feedback #135); Enter on the row still
+            # opens the dedicated prompt for users who arrow down to it.
+            hint += "  ·  Tab: type your own answer"
         console.print(Text(hint, style="dim italic"))
 
     console.print()
