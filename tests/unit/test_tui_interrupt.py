@@ -19,6 +19,8 @@ from lqh.tui.app import (
 
 CTRL_C = "\x03"
 ESC = "\x1b"
+ALT_LEFT = "\x1b[1;3D"  # xterm-style modifier arrow (iTerm2, most Linux terminals)
+META_B = "\x1bb"  # Option-as-Meta word-left (Terminal.app)
 
 
 @pytest.fixture
@@ -432,6 +434,32 @@ class TestCtrlCAndEsc:
         await _drive_keys(app, [(ESC, 0.7)])
         assert not app._shutdown_requested
         assert not app._interrupt_requested
+
+    @pytest.mark.parametrize("keys", [ALT_LEFT, META_B], ids=["xterm", "meta"])
+    async def test_option_left_does_not_interrupt(self, app: LqhApp, keys: str) -> None:
+        """Option/Alt+Left is ESC plus more bytes — it must not read as Esc.
+
+        macOS terminals send Option+Left as ``ESC [1;3D`` (iTerm2) or
+        ``ESC b`` (Terminal.app, "Option as Meta"); the leading ESC used
+        to cancel a busy turn — and wipe an open ask_user prompt — before
+        the arrow behind it was even looked at.
+        """
+        async def hang() -> None:
+            await asyncio.sleep(60)
+
+        run = asyncio.create_task(app._run_interruptible(hang))
+        await asyncio.sleep(0.05)
+
+        await _drive_keys(app, [("hello world", 0.1), (keys, 0.9)])
+
+        assert not run.done()
+        assert not app._interrupt_requested
+        # The arrow still did its job: word-left from the end of the line.
+        assert app._input_buffer.cursor_position == len("hello ")
+
+        run.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run
 
 
 class TestAskUserCleanupOnCancel:

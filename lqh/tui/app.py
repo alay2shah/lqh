@@ -13,11 +13,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from prompt_toolkit import Application
-from prompt_toolkit.application import in_terminal, run_in_terminal
+from prompt_toolkit.application import get_app, in_terminal, run_in_terminal
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import ANSI, FormattedText
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import ConditionalContainer, HSplit, Layout, VSplit, Window
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
@@ -403,9 +404,23 @@ class LqhApp:
         # multiline message mid-turn is far rarer than wanting to interrupt.
         is_agent_busy = Condition(self._agent_busy)
 
+        # Option/Alt+key combos arrive as ESC followed by more bytes in the
+        # same read (macOS Option+Left is ``ESC [1;3D`` or ``ESC b``), and
+        # the parser hands the trailing keys over together with the ESC. A
+        # lone Esc press is only ever flushed on its own. So when more keys
+        # are already queued behind this ESC it is a modifier prefix, not
+        # an interrupt — leave it to the default ``escape <key>`` bindings.
+        def _esc_is_alone() -> bool:
+            return not any(
+                k.key != Keys.CPRResponse
+                for k in get_app().key_processor.input_queue
+            )
+
+        esc_is_alone = Condition(_esc_is_alone)
+
         @kb.add(
             "escape",
-            filter=is_agent_busy & ~has_completion_menu,
+            filter=is_agent_busy & ~has_completion_menu & esc_is_alone,
             eager=True,
         )
         def _esc_interrupt(event):
