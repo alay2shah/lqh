@@ -313,3 +313,94 @@ async def test_locally_modified_after_download_is_kept(
     assert text_b is not None and "kept" in text_b
     assert dest.read_bytes() == b"LOCAL EDIT"
     assert not (run_b.parent / run_b.name / ".lqh_data_gen.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# Parking on a finished-but-not-downloaded run (feedback #130)
+# ---------------------------------------------------------------------------
+
+
+class _SlowStore(_FakeStore):
+    """A download that outlives the waiter's first look at the run."""
+
+    async def download(self, artifact_id, dest: Path) -> None:
+        import asyncio
+
+        await asyncio.sleep(0.4)
+        await super().download(artifact_id, dest)
+
+
+async def test_wait_for_runs_parks_until_the_dataset_is_downloaded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A headless `training_status --wait` on an already-terminal cloud
+    data-gen run used to return at once (the run is not "running") and
+    cancel the watch loop mid-download, leaving datasets/<name>/ empty."""
+    import asyncio
+
+    from lqh.jobs import JobSupervisor
+
+    monkeypatch.setattr("lqh.artifacts.BackendArtifactStore", _SlowStore)
+    monkeypatch.setattr("lqh.project_identity.marker_is_foreign", lambda *a: False)
+    run_dir = _make_run(tmp_path)
+    (run_dir / "remote_job.json").write_text(json.dumps({
+        "remote_name": "cloud", "backend": "cloud", "job_id": "job-1",
+    }))
+    (tmp_path / "datasets" / "ds").mkdir(parents=True)
+
+    async def _completed(self, run_dir, meta):
+        return ("completed", None)
+
+    monkeypatch.setattr(JobSupervisor, "poll_remote", _completed)
+
+    sup = JobSupervisor(tmp_path, poll_interval=0.05)
+    loop_task = asyncio.create_task(sup.watch_loop())
+    try:
+        # The first scan is still inside the download when the waiter
+        # asks (wait_primed timed out in the real caller).
+        await asyncio.sleep(0.1)
+        notice = await asyncio.wait_for(sup.wait_for_runs([run_dir.name]), timeout=5)
+    finally:
+        loop_task.cancel()
+        try:
+            await loop_task
+        except BaseException:
+            pass
+    assert notice is not None and "completed" in notice
+    assert (tmp_path / "datasets" / "ds" / "data.parquet").exists()
+    assert not (run_dir / ".lqh_data_gen.json").exists()
+
+
+async def test_wait_for_runs_does_not_park_on_a_given_up_download(
+    tmp_path: Path,
+) -> None:
+    from lqh.jobs import JobSupervisor
+
+    run_dir = _make_run(tmp_path)
+    sup = JobSupervisor(tmp_path)
+    sup.data_gen_gave_up.add(run_dir.name)
+    assert await sup.wait_for_runs([run_dir.name]) is None
+
+
+async def test_wait_for_runs_ignores_a_foreign_data_gen_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run dir copied in from another project is never scanned, so its
+    marker must not pin the waiter either."""
+    from lqh.jobs import JobSupervisor
+
+    _make_run(tmp_path, marker_extra={"owner_project_id": "someone-else"})
+    monkeypatch.setattr("lqh.project_identity.project_uuid", lambda _p: "me")
+    sup = JobSupervisor(tmp_path)
+    assert await sup.wait_for_runs(None) is None
+
+
+async def test_pull_into_existing_directory_is_a_clear_error(tmp_path: Path) -> None:
+    from lqh.tools.handlers import handle_pull
+
+    (tmp_path / "datasets" / "ds").mkdir(parents=True)
+    result = await handle_pull(tmp_path, source="lqh:art-1", dest="datasets/ds")
+    assert not result.ok
+    assert "existing directory" in result.content
+    assert "datasets/ds/data.parquet" in result.content
+    assert _FakeStore.downloads == []

@@ -428,6 +428,29 @@ class JobSupervisor:
             self.project_dir / "runs" / run_name / ".lqh_data_gen.json"
         ).exists()
 
+    def data_gen_markers(self) -> list[str]:
+        """Run names that still carry a data-gen finalization marker.
+
+        A marker copied in from another project is skipped, as the watch
+        loop skips the run — nothing here would ever consume it.
+        """
+        from lqh.project_identity import marker_is_foreign
+
+        runs_dir = self.project_dir / "runs"
+        names: list[str] = []
+        try:
+            for path in sorted(runs_dir.glob("*/.lqh_data_gen.json")):
+                try:
+                    marker = json.loads(path.read_text())
+                except Exception:
+                    marker = None
+                if marker_is_foreign(self.project_dir, marker):
+                    continue
+                names.append(path.parent.name)
+        except OSError:
+            pass
+        return names
+
     def results_pending(self, run_name: str) -> bool:
         """Whether a successful process still owes its useful eval result."""
         from lqh.progress import has_pending_final_result
@@ -1711,6 +1734,17 @@ class JobSupervisor:
             running = [
                 t.label for t in self.tasks.snapshot() if t.state == "running"
             ]
+            # A cloud data-gen run leaves the registry the moment the job
+            # is terminal, but the user-facing job is not done until the
+            # watch loop has pulled the dataset down (finalize_data_gen_run
+            # consumes the marker). Without this a headless caller
+            # (`lqh tool call training_status --wait`) on an already-
+            # finished run returns before the download and then cancels
+            # the loop that was doing it (feedback #130).
+            seen = set(running)
+            for label in list(self.data_gen_markers()):
+                if label not in seen and label not in self.data_gen_gave_up:
+                    running.append(label)
             if run_names:
                 wanted = set(run_names)
                 running = [r for r in running if r in wanted]

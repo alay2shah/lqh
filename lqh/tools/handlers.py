@@ -3655,6 +3655,16 @@ async def _pull_lqh_artifact(project_dir: Path, artifact_id: str, dest: str | No
     except ValueError as e:
         return ToolResult.fail("validation", f"Error: {e}")
 
+    if target.is_dir():
+        # The download lands via rename onto ``dest``; a directory there
+        # used to surface as "[Errno 21] Is a directory" (feedback #130).
+        return ToolResult.fail(
+            "validation",
+            f"Error: dest {rel!r} is an existing directory; pass the file "
+            f"path to write instead (e.g. {rel.rstrip('/')}/data.parquet "
+            "for a dataset, or a .tar.gz path for a checkpoint).",
+        )
+
     store = BackendArtifactStore()
     try:
         await store.download(artifact_id, target)
@@ -6238,7 +6248,10 @@ async def handle_training_status(
             if (run_dir / ".lqh_data_gen.json").exists():
                 result.content += (
                     "\n⏳ Dataset download pending — wait for the completion "
-                    "notification before using the dataset locally."
+                    "notification before using the dataset locally. Headless "
+                    "(`lqh tool call`): nothing downloads between calls; run "
+                    "training_status with --wait, which parks until the "
+                    "dataset is in datasets/<output_dataset>/."
                 )
                 for run in (result.details or {}).get("runs", []):
                     run["dataset_download_pending"] = True
