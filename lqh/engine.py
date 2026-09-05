@@ -853,7 +853,7 @@ async def _run_pipeline_inner(
                         index, type(exc).__name__, exc,
                         exc_info=log_traceback,
                     )
-                    if code_bug and succeeded == 0:
+                    if code_bug and succeeded == 0 and attempt >= max_retries:
                         # Nothing has worked yet, so the bug looks uniform:
                         # stop now rather than pay for a run that can't
                         # produce anything. Once samples have succeeded the
@@ -862,6 +862,16 @@ async def _run_pipeline_inner(
                         # aborting there throws away every sample already
                         # paid for, so let it fail like any other sample and
                         # let the run finish with a shortfall.
+                        #
+                        # Run the retry ladder first even here. A uniformly
+                        # broken pipeline fails identically on every attempt,
+                        # so fail-fast survives — it just costs the ladder.
+                        # A malformed response, though, is transient, and at
+                        # the head of a run (cloud default concurrency 100)
+                        # nothing has succeeded yet purely because nothing
+                        # has *finished* yet: aborting on the first attempt
+                        # killed whole jobs over one bad response a retry
+                        # would have fixed.
                         abort_error = exc
                         # Signal the stop as well as recording the error.
                         # Returning alone only stops *new* work from

@@ -146,9 +146,10 @@ class Stubborn(Pipeline):
         ]
 """
 
-# A deterministic code bug (the shape that aborts a whole run) fires on
-# the third sample; everything else hangs, standing in for the in-flight
-# work a real run still has open at that moment.
+# A deterministic code bug (the shape that aborts a whole run) fires from
+# the third call on — including every retry of the sample that hit it,
+# which is what makes it deterministic. The first two hang, standing in
+# for the in-flight work a real run still has open at that moment.
 _ABORTING_PIPELINE = """
 import asyncio
 from lqh.pipeline import Pipeline, ChatMLMessage
@@ -158,10 +159,31 @@ _calls = {"n": 0}
 class Aborts(Pipeline):
     async def generate(self, client):
         _calls["n"] += 1
-        if _calls["n"] == 3:
+        if _calls["n"] >= 3:
             raise AttributeError("'list' object has no attribute 'keys'")
         await asyncio.sleep(3600)
         return [ChatMLMessage(role="user", content="hi")]
+"""
+
+# The head of a run: the very first call raises the malformed-response
+# shape, then the same pipeline works. Nothing has succeeded at that
+# moment only because nothing has *finished* yet.
+_TRANSIENT_HEAD_BUG_PIPELINE = """
+import asyncio
+from lqh.pipeline import Pipeline, ChatMLMessage
+
+_calls = {"n": 0}
+
+class TransientHead(Pipeline):
+    async def generate(self, client):
+        _calls["n"] += 1
+        if _calls["n"] == 1:
+            raise AttributeError("'dict' object has no attribute 'strip'")
+        await asyncio.sleep(0.05)
+        return [
+            ChatMLMessage(role="user", content="hi"),
+            ChatMLMessage(role="assistant", content="ok"),
+        ]
 """
 
 _HANGING_PIPELINE = """
@@ -448,6 +470,38 @@ def test_abort_on_a_code_bug_does_not_hang_the_run(chdir_to_tmp: Path) -> None:
             concurrency=4,
         ))
     assert time.monotonic() - started < 10
+
+
+def test_a_transient_code_bug_at_the_head_of_a_run_retries(
+    chdir_to_tmp: Path,
+) -> None:
+    """A bad response in the opening batch must not kill the job.
+
+    The abort is gated on `succeeded == 0`, and at the head of a run
+    that is true of every sample in flight — with the cloud default of
+    100 concurrent samples, the first malformed LLM response arrives
+    long before the first success. Aborting there threw away an
+    approved 8000-sample job over one response a retry would have
+    fixed (feedback #129), so the retry ladder runs first.
+    """
+    project = chdir_to_tmp
+    script = _write(project, _TRANSIENT_HEAD_BUG_PIPELINE)
+    out_dir = project / "datasets" / "d"
+
+    result = _run_bounded(run_pipeline(
+        script_path=script,
+        num_samples=8,
+        output_dir=out_dir,
+        client=object(),  # type: ignore[arg-type]
+        concurrency=8,
+    ))
+
+    assert (result.total, result.succeeded, result.failed) == (8, 8, 0)
+    assert len(pq.read_table(out_dir / "data.parquet")) == 8
+    # Retried, not swept under the rug: the run still names what it hit.
+    assert result.first_code_bug == (
+        "AttributeError: 'dict' object has no attribute 'strip'"
+    )
 
 
 def test_early_finish_leaves_no_unretrieved_future(
