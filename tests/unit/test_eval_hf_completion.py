@@ -1078,6 +1078,80 @@ def test_status_card_says_nothing_extra_for_a_clean_run() -> None:
     assert diagnosis_line(clean) == []
 
 
+async def _status_card(tmp_path, monkeypatch, snap: dict, state: str):
+    """training_status for one cloud run against a stubbed backend."""
+    from lqh.remote.backend import JobStatus
+    from lqh.remote.cloud import CloudBackend
+    from lqh.tools import handlers
+
+    run_dir = tmp_path / "runs" / "sft_1"
+    run_dir.mkdir(parents=True)
+    (run_dir / "remote_job.json").write_text(json.dumps({
+        "job_id": "job-1", "remote_name": "cloud", "backend": "cloud",
+        "remote_run_dir": "cloud:lqh/runs/sft_1",
+    }))
+
+    async def no_sync(self, remote_run_dir, local_run_dir):
+        return None
+
+    async def poll(self, job_id):
+        return JobStatus(state=state)
+
+    async def snapshot(self, job_id):
+        return snap
+
+    async def no_hydrate(project_dir, run_dir):
+        return None
+
+    monkeypatch.setattr(CloudBackend, "sync_progress", no_sync)
+    monkeypatch.setattr(CloudBackend, "poll_status", poll)
+    monkeypatch.setattr(CloudBackend, "job_snapshot", snapshot)
+    monkeypatch.setattr(handlers, "_hydrate_run_eval_artifacts", no_hydrate)
+    return await handlers._training_status_remote(tmp_path, "sft_1", "cloud")
+
+
+@pytest.mark.asyncio
+async def test_status_card_bills_a_finished_cloud_run(tmp_path, monkeypatch) -> None:
+    """A harness governing spend needs the charged number, on the card and
+    in the machine-readable details — not an estimate from the duration."""
+    result = await _status_card(tmp_path, monkeypatch, {
+        "status": "completed",
+        "billed_cost_micros": 1_230_000,
+        "actual_cost_micros": 615_000,  # raw — must never be the shown figure
+        "resource": {"gpu_type": "L4", "timeout_minutes": 120},
+    }, "completed")
+    assert "  Billed: $1.23" in result.content
+    assert "$0.61" not in result.content
+    assert result.details["runs"] == [
+        {"run_name": "sft_1", "state": "completed", "billed_cost_micros": 1_230_000},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_status_card_bills_a_restarted_run_once(tmp_path, monkeypatch) -> None:
+    result = await _status_card(tmp_path, monkeypatch, {
+        "status": "failed",
+        "error": "orphaned: provider has no live sandbox for this job",
+        "billed_cost_micros": 6_400_000,
+        "recovery": {
+            "lease_no": 1, "billed_cost_micros": 6_400_000,
+            "attempts": [{"terminal_reason": "preempted"}, {"terminal_reason": "orphaned"}],
+        },
+    }, "failed")
+    billed = [l for l in result.content.splitlines() if l.lstrip().startswith("Billed:")]
+    assert billed == ["  Billed: ≈$6.40 across 2 leases"]
+    assert result.details["runs"][0]["billed_cost_micros"] == 6_400_000
+
+
+@pytest.mark.asyncio
+async def test_status_card_has_no_bill_while_running(tmp_path, monkeypatch) -> None:
+    result = await _status_card(tmp_path, monkeypatch, {
+        "status": "running", "resource": {"gpu_type": "L4", "timeout_minutes": 120},
+    }, "running")
+    assert "Billed:" not in result.content
+    assert result.details["runs"] == [{"run_name": "sft_1", "state": "running"}]
+
+
 # ---------------------------------------------------------------------------
 # Stale-progress marker
 # ---------------------------------------------------------------------------

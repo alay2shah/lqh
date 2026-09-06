@@ -177,6 +177,13 @@ Asked about one run by name, a cloud data-gen run whose dataset is still
 downloading also carries `dataset_download_pending: true`: `completed`
 does not mean the dataset is usable locally until that clears.
 
+A cloud run that has ended also carries `billed_cost_micros` — what the
+account was charged for the job, in USD micros with the margin applied —
+once the backend has reconciled its cost. Govern spend against that
+number rather than estimating from the run's duration; it is absent
+while the job is still running. The `summary` tool's cloud section shows
+the same figure per job and the project's lifetime billed spend.
+
 ### Exit codes (all subcommands)
 
 | Code | Meaning |

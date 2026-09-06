@@ -711,7 +711,9 @@ def _summarize_cloud(project_dir: Path) -> list[str]:
             status = job.get("status") or "?"
             kind = job.get("kind") or job.get("purpose") or ""
             kind_label = f" {kind}" if kind else ""
-            lines.append(f"    - {job_id}{kind_label}: {status}")
+            billed = _billed_cost_micros(job)
+            cost_label = f" · billed {_fmt_usd_micros(billed)}" if billed is not None else ""
+            lines.append(f"    - {job_id}{kind_label}: {status}{cost_label}")
         if len(jobs) > 5:
             lines.append(f"    …{len(jobs) - 5} more not shown")
         if wrapper.get("jobs_truncated"):
@@ -720,9 +722,11 @@ def _summarize_cloud(project_dir: Path) -> list[str]:
                 "interrupted) — older jobs are not shown here"
             )
 
-    spend = snap.get("lifetime_spend_micros")
+    # Margin applied by the backend; the raw total_spend_micros next to
+    # it is the provider cost and is never what the user was charged.
+    spend = snap.get("billed_spend_micros")
     if isinstance(spend, (int, float)) and spend > 0:
-        lines.append(f"  - lifetime cloud spend: ${spend / 1_000_000:.2f}")
+        lines.append(f"  - lifetime cloud spend (billed): ${spend / 1_000_000:.2f}")
 
     best = snap.get("best_checkpoint")
     if isinstance(best, dict) and best:
@@ -6414,7 +6418,14 @@ async def _training_status_remote(
         # to the user and to the agent without reading the raw error.
         lines.extend(diagnosis_line(snap, status.error))
         lines.extend(_format_cloud_resource_lines(snap))
-        lines.extend(attempt_lines(snap))
+        recovery_lines = attempt_lines(snap)
+        lines.extend(recovery_lines)
+        # attempt_lines bills a restarted or failed job; every other
+        # finished job is billed here — a harness governing spend needs
+        # the real number, not an estimate from the run's duration.
+        if not any(l.lstrip().startswith("Billed:") for l in recovery_lines):
+            if (billed := _billed_cost_micros(snap)) is not None:
+                lines.append(f"  Billed: {_fmt_usd_micros(billed)}")
 
     # Also show local mirror progress if available
     from lqh.train.progress import read_latest_metrics
@@ -6477,10 +6488,22 @@ async def _training_status_remote(
     if sweep_lines:
         lines.extend(sweep_lines)
 
+    run = _run_state(run_name, status.state)
+    if (billed := _billed_cost_micros(snap)) is not None:
+        run["billed_cost_micros"] = billed
     return ToolResult(
-        content="\n".join(lines), ok=True,
-        details=_status_details([_run_state(run_name, status.state)]),
+        content="\n".join(lines), ok=True, details=_status_details([run]),
     )
+
+
+def _billed_cost_micros(snap: dict[str, Any] | None) -> int | None:
+    """What the account was charged for a cloud job, in USD micros with
+    the margin already applied by the backend. None until the job has
+    ended and its cost was reconciled (a running job has no bill yet)."""
+    value = (snap or {}).get("billed_cost_micros")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(value)
 
 
 def _format_cloud_resource_lines(snap: dict[str, Any]) -> list[str]:

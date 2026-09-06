@@ -365,9 +365,14 @@ async def test_cloud_section_renders_from_cached_snapshot(
                 "project_key": cloud_project_key(project_dir),
                 "snapshot": {
                     "jobs": [
-                        {"job_id": "j-123", "status": "completed", "kind": "sft"}
+                        {
+                            "job_id": "j-123", "status": "completed", "kind": "sft",
+                            # Margin applied by the backend (actual_cost_micros
+                            # is the raw provider cost and never shown).
+                            "billed_cost_micros": 1_230_000,
+                        }
                     ],
-                    "lifetime_spend_micros": 2_500_000,
+                    "billed_spend_micros": 2_500_000,
                     "best_checkpoint": {"artifact_id": "ckpt-9"},
                     "deployments": [{"name": "triage-prod", "status": "running"}],
                 },
@@ -379,8 +384,8 @@ async def test_cloud_section_renders_from_cached_snapshot(
 
     assert "**Cloud** (cached snapshot from 2026-07-15T18:02:00+00:00" in result.content
     assert "may lag live state" in result.content
-    assert "j-123 sft: completed" in result.content
-    assert "lifetime cloud spend: $2.50" in result.content
+    assert "j-123 sft: completed · billed $1.23" in result.content
+    assert "lifetime cloud spend (billed): $2.50" in result.content
     assert "selected best checkpoint: ckpt-9" in result.content
     assert "triage-prod: running" in result.content
 
