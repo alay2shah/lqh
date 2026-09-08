@@ -13,6 +13,7 @@ import inspect
 import json
 import logging
 import math
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -637,6 +638,46 @@ async def run_pipeline(
     return result
 
 
+async def _collect_source_items(
+    pipeline_cls: type[Pipeline], project_dir: Path, num_samples: int
+) -> list[Any] | None:
+    """Call ``source()`` and consume up to *num_samples* items off the loop.
+
+    ``source()`` is plain synchronous Python and routinely does slow I/O:
+    ``lqh.sources.hf_dataset`` resolves the repo over the network before
+    the first row and then downloads whole shards as it streams, so the
+    first hundred COCO images take minutes. Iterating that on the event
+    loop stalls everything sharing the loop — the TUI stops repainting
+    and ignores keys (including Esc) until the cap is reached, with the
+    status bar frozen on the last frame it drew ("ready"). Running it on
+    a worker thread keeps the UI live (feedback #145).
+
+    Returns None for pure-generation pipelines (``source()`` is None).
+    ``asyncio.to_thread`` carries the caller's contextvars, so the
+    ``record_source_paths`` / ``hf_dataset_was_used`` recording and the
+    project-root override still see the thread's activity. If the await
+    is cancelled (user Esc) the thread is told to stop at the next item
+    instead of running to the cap while holding the default executor.
+    """
+    stop = threading.Event()
+
+    def collect() -> list[Any] | None:
+        source_items = pipeline_cls.source(project_dir)
+        if source_items is None:
+            return None
+        raw: list[Any] = []
+        for item in source_items:
+            raw.append(item)
+            if len(raw) >= num_samples or stop.is_set():
+                break
+        return raw
+
+    try:
+        return await asyncio.to_thread(collect)
+    finally:
+        stop.set()
+
+
 async def _run_pipeline_inner(
     script_path: Path,
     num_samples: int,
@@ -654,17 +695,12 @@ async def _run_pipeline_inner(
 
     # Determine the work items: list of (input_item | None) to process.
     project_dir = script_path.parent.parent  # data_gen/ -> project root
-    source_items = pipeline_cls.source(project_dir)
+    raw_items = await _collect_source_items(pipeline_cls, project_dir, num_samples)
 
     work: list[Any]
-    if source_items is not None:
-        # Bring-your-data mode: consume up to num_samples items, each
-        # repeated samples_per_item times.
-        raw_items: list[Any] = []
-        for item in source_items:
-            raw_items.append(item)
-            if len(raw_items) >= num_samples:
-                break
+    if raw_items is not None:
+        # Bring-your-data mode: up to num_samples items, each repeated
+        # samples_per_item times.
         work = []
         for item in raw_items:
             for _ in range(samples_per_item):
@@ -685,7 +721,7 @@ async def _run_pipeline_inner(
     # one, and could abort a run on a deterministic bug in an item the
     # caller never asked to process.
     target = len(work)
-    margin = 0 if source_items is not None else _overcommit_margin(target)
+    margin = 0 if raw_items is not None else _overcommit_margin(target)
     if margin > 0:
         work.extend([None] * margin)
 
