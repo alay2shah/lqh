@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -9,6 +10,60 @@ from unittest.mock import MagicMock
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+
+
+def test_on_policy_dpo_uses_leap_trainer() -> None:
+    """Keep the LQH on-policy loop wired to Leap's trainer implementation."""
+    source_path = Path(__file__).parents[2] / "lqh" / "train" / "dpo.py"
+    tree = ast.parse(source_path.read_text())
+
+    imported_names = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "trl"
+        for alias in node.names
+    }
+    constructed_names = {
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+
+    assert "DPOTrainer" not in imported_names
+    assert "LFMDPOTrainer" in constructed_names
+
+
+def test_sft_uses_leap_trainers() -> None:
+    """Ensure both text and VLM SFT paths use Leap's trainer classes."""
+    source_path = Path(__file__).parents[2] / "lqh" / "train" / "sft.py"
+    tree = ast.parse(source_path.read_text())
+    imports = {
+        (node.module, alias.name)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    }
+
+    assert ("trl", "SFTTrainer") not in imports
+    assert ("leap_finetune.training.sft", "LFMSFTTrainer") in imports
+    assert ("leap_finetune.training.vlm_sft", "LFMVLMTrainer") in imports
+
+
+def test_sft_passes_leap_tokenized_datasets_to_trainer() -> None:
+    """Guard against handing Leap the raw ChatML dataset by stale reference."""
+    source_path = Path(__file__).parents[2] / "lqh" / "train" / "sft.py"
+    source = source_path.read_text()
+
+    assert 'trainer_kwargs["train_dataset"] = train_dataset' in source
+    assert 'trainer_kwargs["eval_dataset"] = eval_dataset' in source
+
+
+def test_sft_passes_the_peft_wrapped_model_to_leap() -> None:
+    """Guard against wrapping a model but training the stale base reference."""
+    source_path = Path(__file__).parents[2] / "lqh" / "train" / "sft.py"
+    source = source_path.read_text()
+
+    assert 'trainer_kwargs["model"] = model' in source
 
 
 async def test_gap_selector_aligns_sample_ids_and_excludes_bad_pairs(

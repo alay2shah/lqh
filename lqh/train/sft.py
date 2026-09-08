@@ -20,7 +20,7 @@ from transformers import (
     TrainerState,
     TrainingArguments,
 )
-from trl import SFTConfig, SFTTrainer
+from trl import SFTConfig
 
 from lqh.progress import (
     FINAL_INFERENCE_END,
@@ -851,7 +851,9 @@ def sft_loop(run_dir: Path, config: dict[str, Any]) -> None:
     # passed no deadline (SSH-direct runs, local runs).
     deadline_cb = DeadlineStopCallback(run_dir, label="sft")
 
-    # Trainer
+    # Leap's SFT trainers are built on transformers.Trainer rather than TRL's
+    # SFTTrainer. Tokenize text rows explicitly and attach the adapter here so
+    # the existing LQH model/checkpoint lifecycle remains unchanged.
     trainer_kwargs: dict[str, Any] = {
         "model": model,
         "args": sft_config,
@@ -867,10 +869,65 @@ def sft_loop(run_dir: Path, config: dict[str, Any]) -> None:
         )
     if eval_dataset is not None:
         trainer_kwargs["eval_dataset"] = eval_dataset
-    if peft_config is not None:
-        trainer_kwargs["peft_config"] = peft_config
 
-    trainer = SFTTrainer(**trainer_kwargs)
+    try:
+        if is_vision:
+            from leap_finetune.training.vlm_sft import LFMVLMTrainer
+        else:
+            from leap_finetune.data_loading.tokenize_data import tokenize_sft
+            from leap_finetune.training.sft import (
+                LFMSFTTrainer,
+                build_sft_data_collator,
+            )
+    except ImportError as exc:
+        raise RuntimeError(
+            "LQH training requires the leap-finetune package; "
+            "install LQH's training dependencies with Leap enabled"
+        ) from exc
+
+    if not is_vision:
+        tokenization_kwargs = {
+            "tokenizer": tokenizer,
+            "max_length": int(training_cfg.get("max_seq_length", 2048)),
+            "assistant_only_loss": False,
+            "completion_only_loss": False,
+            "truncate": True,
+        }
+        train_dataset = train_dataset.map(
+            tokenize_sft,
+            fn_kwargs=tokenization_kwargs,
+            remove_columns=train_dataset.column_names,
+        )
+        if eval_dataset is not None:
+            eval_dataset = eval_dataset.map(
+                tokenize_sft,
+                fn_kwargs=tokenization_kwargs,
+                remove_columns=eval_dataset.column_names,
+            )
+        trainer_kwargs["data_collator"] = build_sft_data_collator(tokenizer, training_cfg)
+        # trainer_kwargs was assembled before tokenization. Refresh these
+        # references so Leap receives the tokenized datasets, not the raw
+        # ChatML rows captured above.
+        trainer_kwargs["train_dataset"] = train_dataset
+        if eval_dataset is not None:
+            trainer_kwargs["eval_dataset"] = eval_dataset
+
+    if peft_config is not None:
+        from peft import get_peft_model
+
+        model = get_peft_model(model, peft_config)
+        trainer_kwargs["model"] = model
+
+    if is_vision:
+        trainer_cls = LFMVLMTrainer
+        trainer_kwargs["lr_multipliers"] = training_cfg.get("lr_multipliers")
+        trainer_kwargs["group_by_image_tiles"] = bool(
+            training_cfg.get("group_by_image_tiles", False)
+        )
+    else:
+        trainer_cls = LFMSFTTrainer
+
+    trainer = trainer_cls(**trainer_kwargs)
 
     print("Starting training...")
     train_with_checkpoint_fallback(

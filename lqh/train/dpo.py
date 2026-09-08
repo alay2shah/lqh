@@ -28,7 +28,7 @@ from transformers import (
     TrainerState,
     TrainingArguments,
 )
-from trl import DPOConfig, DPOTrainer
+from trl import DPOConfig
 
 from lqh.train.data_utils import (
     load_chatml_datasets,
@@ -895,6 +895,33 @@ def dpo_loop(run_dir: Path, config: dict[str, Any]) -> None:
             Dataset.from_list([_to_dpo(p) for p in eval_raw]) if eval_raw else None
         )
 
+        # Leap's LFMDPOTrainer intentionally bypasses TRL's internal dataset
+        # preparation. Tokenize here so its TRL v1 collator receives the
+        # prompt_ids/chosen_ids/rejected_ids columns it expects.
+        try:
+            from leap_finetune.data_loading.tokenize_data import tokenize_dpo
+        except ImportError as exc:
+            raise RuntimeError(
+                "on-policy DPO requires the leap-finetune package; "
+                "install LQH's training dependencies with Leap enabled"
+            ) from exc
+        dpo_tokenization_kwargs = {
+            "tokenizer": tokenizer,
+            "max_prompt_length": int(training_cfg.get("max_seq_length", 2048)),
+            "max_completion_length": int(training_cfg.get("max_seq_length", 2048)),
+        }
+        dpo_dataset = dpo_dataset.map(
+            tokenize_dpo,
+            fn_kwargs=dpo_tokenization_kwargs,
+            remove_columns=dpo_dataset.column_names,
+        )
+        if eval_dataset is not None:
+            eval_dataset = eval_dataset.map(
+                tokenize_dpo,
+                fn_kwargs=dpo_tokenization_kwargs,
+                remove_columns=eval_dataset.column_names,
+            )
+
         # Eval cadence: DPO iters are short (50–300 steps), so eval more
         # frequently than SFT. Default ~10 steps; user-overridable.
         eval_steps = int(training_cfg.get("dpo_eval_steps", training_cfg.get("eval_steps", 10)))
@@ -978,7 +1005,7 @@ def dpo_loop(run_dir: Path, config: dict[str, Any]) -> None:
             gradient_checkpointing=training_cfg.get("gradient_checkpointing", True),
             bf16=training_cfg.get("bf16", True),
             max_length=training_cfg.get("max_seq_length", 2048),
-            logging_steps=10,
+            logging_steps=training_cfg.get("logging_steps", 10),
             remove_unused_columns=False,
             seed=training_cfg.get("seed", 42),
             data_seed=training_cfg.get(
@@ -1129,7 +1156,18 @@ def dpo_loop(run_dir: Path, config: dict[str, Any]) -> None:
         if peft_config is not None and iteration == 0 and not model_has_peft:
             trainer_kwargs["peft_config"] = peft_config
 
-        trainer = DPOTrainer(**trainer_kwargs)
+        # Leap owns the DPO trainer implementation. Keep LQH's surrounding
+        # on-policy loop unchanged: it still rolls out, judges, builds pairs,
+        # and feeds the updated in-memory policy into the next iteration.
+        try:
+            from leap_finetune.training.dpo import LFMDPOTrainer
+        except ImportError as exc:
+            raise RuntimeError(
+                "on-policy DPO requires the leap-finetune package; "
+                "install LQH's training dependencies with Leap enabled"
+            ) from exc
+
+        trainer = LFMDPOTrainer(**trainer_kwargs)
         train_result = train_with_checkpoint_fallback(
             trainer,
             iter_dir / "dpo_output",
