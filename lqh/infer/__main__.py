@@ -131,6 +131,40 @@ def _init_prediction_partial(
     return {}
 
 
+def build_schema_prefix_fn(tokenizer: Any, response_format: Any) -> Any:
+    """Build the HF ``prefix_allowed_tokens_fn`` that enforces *response_format*.
+
+    Shared by ``lqh.infer`` and the training run's own checkpoint eval
+    (``lqh.train.sft._run_checkpoint_eval``) so both grade a checkpoint under
+    the same decoding contract. *tokenizer* must be the text tokenizer (for a
+    vision processor pass ``processor.tokenizer``). Raises on a schema or
+    integration error — callers hard-fail rather than silently decoding
+    free-form.
+    """
+    inner_schema = _normalize_inner_schema(response_format)
+
+    # lm-format-enforcer ≤0.11.3 imports ``PreTrainedTokenizerBase`` from
+    # ``transformers.tokenization_utils`` (the v4 path). In transformers
+    # v5 the class moved to ``transformers.tokenization_utils_base``, so
+    # the integration import fails and lmfe's shim re-raises a misleading
+    # "transformers is not installed" error. Patch the old path before
+    # the integration module is imported.
+    import transformers.tokenization_utils as _ttu
+    from transformers.tokenization_utils_base import (
+        PreTrainedTokenizerBase as _PTTB,
+    )
+    if not hasattr(_ttu, "PreTrainedTokenizerBase"):
+        _ttu.PreTrainedTokenizerBase = _PTTB  # type: ignore[attr-defined]
+
+    from lmformatenforcer import JsonSchemaParser
+    from lmformatenforcer.integrations.transformers import (
+        build_transformers_prefix_allowed_tokens_fn,
+    )
+
+    parser = JsonSchemaParser(inner_schema)
+    return build_transformers_prefix_allowed_tokens_fn(tokenizer, parser)
+
+
 def _normalize_inner_schema(response_format: Any) -> Any:
     """Unwrap a ``response_format`` config value to the bare JSON schema.
 
@@ -387,28 +421,8 @@ def _run_inference_hf(run_dir: Path, config: dict) -> None:
     schema_prefix_fn = None
     if response_format:
         inner_schema = _normalize_inner_schema(response_format)
-
-        # lm-format-enforcer ≤0.11.3 imports ``PreTrainedTokenizerBase`` from
-        # ``transformers.tokenization_utils`` (the v4 path). In transformers
-        # v5 the class moved to ``transformers.tokenization_utils_base``, so
-        # the integration import fails and lmfe's shim re-raises a misleading
-        # "transformers is not installed" error. Patch the old path before
-        # the integration module is imported.
-        import transformers.tokenization_utils as _ttu
-        from transformers.tokenization_utils_base import (
-            PreTrainedTokenizerBase as _PTTB,
-        )
-        if not hasattr(_ttu, "PreTrainedTokenizerBase"):
-            _ttu.PreTrainedTokenizerBase = _PTTB  # type: ignore[attr-defined]
-
-        from lmformatenforcer import JsonSchemaParser
-        from lmformatenforcer.integrations.transformers import (
-            build_transformers_prefix_allowed_tokens_fn,
-        )
-
-        parser = JsonSchemaParser(inner_schema)
-        schema_prefix_fn = build_transformers_prefix_allowed_tokens_fn(
-            tokenizer.tokenizer if is_vision else tokenizer, parser,
+        schema_prefix_fn = build_schema_prefix_fn(
+            tokenizer.tokenizer if is_vision else tokenizer, response_format,
         )
         print(
             f"  JSON-schema constrained decoding enabled "

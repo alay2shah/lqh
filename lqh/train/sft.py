@@ -510,6 +510,29 @@ def _run_checkpoint_eval(
     max_seq = config.get("training", {}).get("max_seq_length", 2048)
     is_vision = config.get("modality") == "vision"
 
+    # Constrained decoding: a run submitted with response_format_path is
+    # graded under the same JSON-schema contract lqh.infer / eval_hf_model
+    # enforce, so its judge score is comparable to a constrained eval of the
+    # same checkpoint. Without the schema the loop decodes free-form; say so
+    # in the log either way — silence reads as "constrained" (feedback #123).
+    schema_prefix_fn = None
+    if config.get("response_format"):
+        from lqh.infer.__main__ import build_schema_prefix_fn
+
+        schema_prefix_fn = build_schema_prefix_fn(
+            tokenizer.tokenizer if is_vision else tokenizer,
+            config["response_format"],
+        )
+        print(
+            f"  checkpoint eval ({checkpoint_dir.name}): JSON-schema "
+            "constrained decoding enabled"
+        )
+    else:
+        print(
+            f"  checkpoint eval ({checkpoint_dir.name}): UNCONSTRAINED "
+            "decoding — no response_format in the run config"
+        )
+
     predictions: list[dict[str, Any]] = []
     model.eval()
 
@@ -589,11 +612,15 @@ def _run_checkpoint_eval(
                     # to the model device.
                     from lqh.train.vlm_data import vlm_generate
 
+                    vlm_kwargs: dict[str, Any] = {}
+                    if schema_prefix_fn is not None:
+                        vlm_kwargs["prefix_allowed_tokens_fn"] = schema_prefix_fn
                     response = vlm_generate(
                         model,
                         tokenizer,
                         prompt_msgs,
                         max_new_tokens=min(max_seq, 1024),
+                        **vlm_kwargs,
                     )
                 else:
                     # tools= is the ONLY way the tool list reaches the
@@ -614,12 +641,14 @@ def _run_checkpoint_eval(
                     )
                     input_ids = inputs["input_ids"].to(model.device)
 
+                    generate_kwargs: dict[str, Any] = {
+                        "max_new_tokens": min(max_seq, 1024),
+                        "do_sample": False,
+                    }
+                    if schema_prefix_fn is not None:
+                        generate_kwargs["prefix_allowed_tokens_fn"] = schema_prefix_fn
                     with torch.no_grad():
-                        output_ids = model.generate(
-                            input_ids,
-                            max_new_tokens=min(max_seq, 1024),
-                            do_sample=False,
-                        )
+                        output_ids = model.generate(input_ids, **generate_kwargs)
                     response = tokenizer.decode(
                         output_ids[0][input_ids.shape[-1]:],
                         skip_special_tokens=True,

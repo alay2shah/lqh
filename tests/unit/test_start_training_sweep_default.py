@@ -372,3 +372,60 @@ def test_a_non_numeric_seed_is_rejected(launch):
     rec = launch(type="sft", seed="nope")
     assert rec["result"].ok is False
     assert "seed must be an integer" in rec["result"].content
+
+
+# ---------------------------------------------------------------------------
+# response_format_path — the run's own checkpoint/final evals decode under
+# the task schema (feedback #123). Before this the training config never
+# carried response_format, so lqh.train.sft._run_checkpoint_eval and the
+# sweep's eval-of-best always generated free-form.
+# ---------------------------------------------------------------------------
+
+
+def _write_schema(project: Path) -> str:
+    schema = project / "prompts" / "diag.schema.json"
+    schema.parent.mkdir(parents=True, exist_ok=True)
+    schema.write_text(json.dumps({
+        "type": "object",
+        "properties": {"diagnosis": {"type": "string"}},
+        "required": ["diagnosis"],
+    }))
+    return "prompts/diag.schema.json"
+
+
+def test_response_format_path_reaches_the_single_run_config(launch, tmp_path):
+    project = tmp_path / "proj"
+    rec = launch(type="sft", response_format_path=_write_schema(project))
+    assert rec["module"] == "lqh.train"
+    assert rec["config"]["response_format"]["required"] == ["diagnosis"]
+
+
+def test_response_format_path_reaches_the_sweep_base_config(launch, tmp_path):
+    """sweep._build_eval_config forwards base['response_format'] to lqh.infer."""
+    project = tmp_path / "proj"
+    rec = launch(
+        type="sft", enable_sweep=True, response_format_path=_write_schema(project),
+    )
+    assert rec["module"] == "lqh.train.sweep"
+    assert rec["config"]["base_config"]["response_format"]["required"] == ["diagnosis"]
+
+
+def test_omitting_response_format_path_leaves_the_config_unconstrained(launch):
+    rec = launch(type="sft")
+    assert "response_format" not in rec["config"]
+
+
+def test_missing_response_format_file_is_rejected_before_launch(launch):
+    rec = launch(type="sft", response_format_path="prompts/nope.schema.json")
+    assert "config" not in rec
+    assert not rec["result"].ok
+    assert "prompts/nope.schema.json" in rec["result"].content
+
+
+def test_dpo_rejects_response_format_path(launch, tmp_path):
+    """dpo.py's generation loop does not enforce a schema; never let one look on."""
+    project = tmp_path / "proj"
+    rec = launch(type="on_policy_dpo", response_format_path=_write_schema(project))
+    assert "config" not in rec
+    assert not rec["result"].ok
+    assert "not supported for DPO" in rec["result"].content

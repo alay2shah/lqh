@@ -747,6 +747,72 @@ def test_mid_run_checkpoint_eval_is_capped_and_the_final_one_is_not(
     assert _checkpoint_eval_sampling(uncapped_dir) is None
 
 
+def test_checkpoint_eval_decodes_under_the_run_schema(
+    tmp_path: Path,
+    sft_module,  # noqa: ANN001
+    sample_conversations,  # noqa: ANN001
+    write_chatml_parquet,  # noqa: ANN001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run submitted with response_format_path is graded under that schema.
+
+    The training config never carried response_format before, and this loop
+    never looked for one, so a training run's own eval decoded free-form even
+    when eval_hf_model on the same checkpoint was constrained (feedback #123).
+    """
+    import lqh.infer.__main__ as infer_main
+
+    seen: dict[str, object] = {}
+
+    class _RecordingModel(_FakeModel):
+        def generate(self, input_ids, **kwargs):  # noqa: ANN001, ANN201
+            seen["generate_kwargs"] = kwargs
+            return _FakeIds([[1, 2, 3, 4]])
+
+    def fake_build(tokenizer, response_format):  # noqa: ANN001, ANN201
+        seen["schema"] = response_format
+        return "prefix-fn"
+
+    monkeypatch.setattr(infer_main, "build_schema_prefix_fn", fake_build)
+
+    eval_path = write_chatml_parquet(
+        tmp_path / "eval" / "eval.parquet", sample_conversations(2),
+    )
+    schema = {"type": "object", "properties": {"a": {"type": "string"}}}
+    final_dir = tmp_path / "sft_001" / "checkpoints" / "final"
+    final_dir.mkdir(parents=True)
+    sft_module._run_checkpoint_eval(
+        model=_RecordingModel(),
+        tokenizer=_FakeTokenizer(),
+        config={
+            "type": "sft",
+            "eval_on_checkpoints": True,
+            "eval_dataset": str(eval_path),
+            "response_format": schema,
+        },
+        checkpoint_dir=final_dir,
+    )
+    assert seen["schema"] == schema
+    assert seen["generate_kwargs"]["prefix_allowed_tokens_fn"] == "prefix-fn"
+
+    # No schema in the config: the loop must not reach for the enforcer.
+    seen.clear()
+    plain_dir = tmp_path / "sft_001" / "checkpoints" / "step_10"
+    plain_dir.mkdir(parents=True)
+    sft_module._run_checkpoint_eval(
+        model=_RecordingModel(),
+        tokenizer=_FakeTokenizer(),
+        config={
+            "type": "sft",
+            "eval_on_checkpoints": True,
+            "eval_dataset": str(eval_path),
+        },
+        checkpoint_dir=plain_dir,
+    )
+    assert "schema" not in seen
+    assert "prefix_allowed_tokens_fn" not in seen["generate_kwargs"]
+
+
 def test_a_relaunch_that_stops_sampling_clears_the_stale_label(
     tmp_path: Path,
     sft_module,  # noqa: ANN001

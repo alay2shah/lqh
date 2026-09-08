@@ -5378,6 +5378,7 @@ async def handle_start_training(
     enable_sweep: bool | None = None,
     grid_size: str = "small",
     override_budget: bool = False,
+    response_format_path: str | None = None,
     _permissions: PermissionContext | None = None,
     **kwargs: Any,
 ) -> ToolResult:
@@ -5604,6 +5605,20 @@ async def handle_start_training(
             ),
         )
 
+    # DPO generates through its own loop (lqh/train/dpo.py) which does not
+    # enforce a schema; accepting the parameter there would carry the same
+    # silent-unconstrained bug this fixes for SFT into DPO's judge evals.
+    if type in ("on_policy_dpo", "dpo") and response_format_path:
+        return ToolResult.fail(
+            "validation",
+            (
+                "Error: response_format_path is not supported for DPO — its "
+                "rollout and eval generation are not schema-constrained. Omit it "
+                "(DPO evals decode free-form) or evaluate the finished checkpoint "
+                "with eval_hf_model / start_local_eval, which accept it."
+            ),
+        )
+
     # GRPO's scorer IS the reward: the judge ranks every rollout group
     # against it. Without a scorer there is no training signal at all.
     if is_grpo and disable_scoring:
@@ -5649,6 +5664,22 @@ async def handle_start_training(
         if not scorer_resolved.exists():
             return ToolResult.fail("not_found", f"Error: scorer not found at {scorer}")
         scorer_path = scorer
+
+    # The run's own checkpoint/final evals decode under this schema (see
+    # _run_checkpoint_eval and sweep._build_eval_config); without it they
+    # generate free-form even when the task has a contract (feedback #123).
+    # Explicit only: the training set carries its system prompt inline, so
+    # there is no system_prompt_path to auto-discover a schema from.
+    schema_dict: dict[str, Any] | None = None
+    if response_format_path:
+        try:
+            _, schema_dict = _resolve_eval_extras(
+                project_dir,
+                system_prompt_path=None,
+                response_format_path=response_format_path,
+            )
+        except FileNotFoundError as e:
+            return ToolResult.fail("not_found", f"Error: {e}")
 
     # Vision-language (LFM-VL) bases switch the run into the vision path:
     # AutoProcessor + image collation in the subprocess, the Liquid VLM
@@ -5835,6 +5866,8 @@ async def handle_start_training(
     if scorer_path:
         config["scorer"] = scorer_path
         config["manifest"].append("scorer")
+    if schema_dict is not None:
+        config["response_format"] = schema_dict
 
     if type in ("on_policy_dpo", "dpo"):
         config["num_iterations"] = num_iterations

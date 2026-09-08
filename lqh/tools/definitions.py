@@ -1784,6 +1784,22 @@ def _build_all_tools(*, auto_mode: bool = False) -> list[dict]:
                         ),
                         "default": "dataset",
                     },
+                    "response_format_path": {
+                        "type": "string",
+                        "description": (
+                            "Relative path to a JSON-schema file (e.g. "
+                            "'prompts/<task>.schema.json') that constrains decoding "
+                            "during the run's checkpoint and final evals — the same "
+                            "schema you would pass to eval_hf_model or "
+                            "start_local_eval. Pass it whenever the task has a "
+                            "schema: without it the run's own eval generates "
+                            "free-form, so its judge score is not comparable to a "
+                            "constrained eval of the same checkpoint. NOT "
+                            "auto-discovered here (there is no system_prompt_path on "
+                            "a training run — the dataset carries its system prompt). "
+                            "SFT and GRPO only; DPO rejects it."
+                        ),
+                    },
                 },
                 "required": ["type", "base_model", "dataset", "eval_dataset"],
             },
