@@ -8,8 +8,45 @@ keeping import-time lightweight so error messages are immediate.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
+
+
+def write_provenance(run_dir: Path) -> dict[str, str]:
+    """Record which trainer produced this run: ``run_dir/provenance.json``
+    plus one stdout line at the top of the log.
+
+    Two jobs launched an hour apart trained under different objectives
+    (the assistant-only loss switch rode a training-image promotion) and
+    nothing on either run said so — the image id lived only in the
+    checkpoint's lineage row and the lqh version nowhere at all (feedback
+    #142). The file is published with the run and pulled back by
+    training_status; the log line is for anyone reading stdout.
+
+    Best-effort: a run must never die because provenance could not be
+    written.
+    """
+    from lqh import __version__
+
+    provenance = {
+        "lqh_version": __version__,
+        # Injected by the cloud-job launcher (handler/cloud_jobs.go);
+        # empty for SSH-direct and local runs.
+        "image_id": os.environ.get("LQH_IMAGE_ID", ""),
+        "image_purpose": os.environ.get("LQH_IMAGE_PURPOSE", ""),
+    }
+    print(
+        f"lqh {__version__} · image {provenance['image_id'] or 'local'}",
+        flush=True,
+    )
+    try:
+        (run_dir / "provenance.json").write_text(
+            json.dumps(provenance, indent=2) + "\n"
+        )
+    except OSError as exc:
+        print(f"  WARNING: could not write provenance.json: {exc}")
+    return provenance
 
 
 def main() -> None:
@@ -26,9 +63,10 @@ def main() -> None:
     run_dir = config_path.parent
 
     # Write PID file so the main process can track us.
-    (run_dir / "pid").write_text(str(__import__("os").getpid()))
+    (run_dir / "pid").write_text(str(os.getpid()))
     from lqh.train.progress import begin_run_attempt, write_status
     begin_run_attempt(run_dir)
+    write_provenance(run_dir)
 
     run_type = config.get("type", "sft")
 

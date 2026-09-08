@@ -1168,7 +1168,15 @@ def sft_loop(run_dir: Path, config: dict[str, Any]) -> None:
         # are still broken upstream (transformers #44521), so VLM runs keep
         # the full-sequence loss. Not configurable (lqh.train.assistant_mask).
         assistant_only_loss=not is_vision,
-        dataloader_num_workers=training_cfg.get("dataloader_num_workers", 4),
+        # 0, not 4: forked DataLoader workers after the parent has
+        # initialised CUDA can deadlock on the first batch fetch — the
+        # failure the VLM path below has always worked around — and since
+        # the 2026-09-03 image (torch 2.13 / trl 1.12) ~5% of text SFT jobs
+        # printed "Starting training..." and then hung at step 0 until
+        # someone cancelled them (feedback #142). TRL pre-tokenises the
+        # text dataset, so the workers only ever padded; in-process
+        # collation costs nothing measurable.
+        dataloader_num_workers=training_cfg.get("dataloader_num_workers", 0),
         dataloader_pin_memory=True,
         ddp_find_unused_parameters=False,
         seed=seed,
@@ -1184,9 +1192,8 @@ def sft_loop(run_dir: Path, config: dict[str, Any]) -> None:
         # torchvision image-processing ops, and forked DataLoader workers
         # deadlock on those after the parent has initialized CUDA (first
         # cloud smoke run hung indefinitely at the first batch fetch).
-        # Text runs are unaffected — their collation is plain tokenizer
-        # work. PIL decode + preprocess is cheap next to the VLM forward,
-        # so in-process collation costs little.
+        # PIL decode + preprocess is cheap next to the VLM forward, so
+        # in-process collation costs little.
         sft_kwargs.update(
             max_length=None,
             remove_unused_columns=False,

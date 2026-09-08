@@ -499,6 +499,29 @@ class TestTrainingHealthBlock:
             "  Training health: 60 steps · loss 2.25 · lr 2.0e-04 · seed 7"
         ]
 
+    def test_reports_the_trainer_version_and_image(self, tmp_path: Path) -> None:
+        """Two identical recipes an hour apart trained under different
+        objectives because the image changed in between; the line has to say
+        which trainer a run used (feedback #142)."""
+        from lqh.tools.handlers import _format_training_health_block
+
+        self._config(tmp_path, {"learning_rate": 2e-4, "seed": 7})
+        self._history(tmp_path, [{"step": 60, "loss": 2.25}])
+        (tmp_path / "provenance.json").write_text(json.dumps({
+            "lqh_version": "0.18.1",
+            "image_id": "im-SnUQ2q17MQXs0LcbBysVMO",
+            "image_purpose": "sft",
+        }))
+        assert _format_training_health_block(tmp_path) == [
+            "  Training health: 60 steps · loss 2.25 · lr 2.0e-04 · seed 7"
+            " · lqh 0.18.1 · image im-SnUQ2q17MQXs0LcbBysVMO"
+        ]
+        # A local run has no image; an unreadable file shows nothing.
+        (tmp_path / "provenance.json").write_text(json.dumps({"lqh_version": "0.18.1"}))
+        assert _format_training_health_block(tmp_path)[0].endswith("seed 7 · lqh 0.18.1")
+        (tmp_path / "provenance.json").write_text("{not json")
+        assert _format_training_health_block(tmp_path)[0].endswith("seed 7")
+
     def test_warns_when_the_run_took_too_few_steps(self, tmp_path: Path) -> None:
         """The 21-step run that read as 'the dataset is bad'."""
         from lqh.tools.handlers import _format_training_health_block

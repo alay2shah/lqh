@@ -2538,6 +2538,8 @@ async def _hydrate_run_eval_artifacts(project_dir: Path, run_dir: Path) -> None:
         # a "metrics" artifact but never pulled, so the training-health block
         # was empty for every cloud run — i.e. for every real run.
         "eval_history.json",
+        # Trainer version + image id, for the training-health line.
+        "provenance.json",
         # A sweep's per-config training output is in sweep_<id>/, so the
         # leaderboard has to come down first to learn which child won.
         "sweep_summary.json",
@@ -2555,6 +2557,7 @@ async def _hydrate_run_eval_artifacts(project_dir: Path, run_dir: Path) -> None:
             sweep_rels = (
                 f"sweep_{config_id}/eval_history.json",
                 f"sweep_{config_id}/config.json",
+                f"sweep_{config_id}/provenance.json",
             )
             await _backfill_artifact_manifest(project_dir, run_dir, sweep_rels)
             for rel in sweep_rels:
@@ -6747,6 +6750,17 @@ def _run_config_training_block(run_dir: Path) -> dict[str, Any]:
     return training if isinstance(training, dict) else {}
 
 
+def _run_provenance(run_dir: Path) -> dict[str, Any]:
+    """A run's ``provenance.json`` (lqh.train.__main__.write_provenance) →
+    dict, {} when absent or unreadable. Runs from before the file existed
+    simply show no version."""
+    try:
+        prov = json.loads((run_dir / "provenance.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return prov if isinstance(prov, dict) else {}
+
+
 def _sweep_winner_config_id(run_dir: Path) -> str | None:
     """The winning config id from ``sweep_summary.json``, or None.
 
@@ -6858,6 +6872,14 @@ def _format_training_health_block(run_dir: Path) -> list[str]:
         return []
     if isinstance(run_seed, int) and not isinstance(run_seed, bool):
         parts.append(f"seed {run_seed}")
+    # What the run trained under. A training-image promotion can change
+    # the objective between two identical recipes (feedback #142), so the
+    # version and image belong next to the numbers they explain.
+    provenance = _run_provenance(metrics_dir)
+    if isinstance(v := provenance.get("lqh_version"), str) and v:
+        parts.append(f"lqh {v}")
+    if isinstance(img := provenance.get("image_id"), str) and img:
+        parts.append(f"image {img}")
 
     lines = [f"  Training health: {' · '.join(parts)}"]
     from lqh.train.defaults import SFT_MIN_HEALTHY_OPTIMIZER_STEPS

@@ -226,6 +226,9 @@ def _resolve_candidates(run_dir: Path) -> list[_Candidate]:
         "stderr.log": "logs",
         "config.json": "other",
         "eval_history.json": "metrics",
+        # Trainer version + image id (lqh.train.__main__.write_provenance);
+        # training_status pulls it back to show what a run trained under.
+        "provenance.json": "metrics",
         # Sweep leaderboard + per-config ledger. Small JSON, and the only
         # place a sweep's per-config results exist off the sandbox volume:
         # write_run_manifest reads sweep_summary.json from the run root to
@@ -421,6 +424,7 @@ def _resolve_candidates(run_dir: Path) -> list[_Candidate]:
             "stderr.log":        "logs",
             "progress.jsonl":    "metrics",
             "eval_history.json": "metrics",
+            "provenance.json":   "metrics",
             "chosen_ce_summary.json": "metrics",
             "status.json":       "metrics",
         }
