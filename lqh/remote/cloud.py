@@ -23,9 +23,11 @@ final status event that the consumer writes to ``status.json``.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
+import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -292,6 +294,7 @@ class CloudBackend(RemoteBackend):
         # process migrates the identity mid-flight.
         project_key = cloud_project_key(self.project_dir)
         owner_project_id = project_uuid(self.project_dir)
+        training_manifest: dict[str, Any] | None = None
         try:
             # Spec provenance rides in the config so the sandbox-side
             # lineage/manifest writers can record which spec revision
@@ -299,6 +302,13 @@ class CloudBackend(RemoteBackend):
             spec_hash = compute_spec_sha256(self.project_dir)
             if spec_hash and not config.get("spec_sha256"):
                 config["spec_sha256"] = spec_hash
+            # Newer cloud backends require every training submit to carry a
+            # reproducible base-model manifest. Keep this compatibility layer
+            # in CloudBackend so local and SSH training stay untouched.
+            if kind.startswith("train_") and training_manifest is None:
+                training_manifest = await self._prepare_training_manifest(
+                    config, kind, project_key
+                )
             # Build to disk so bring-your-own seed data (image folders on
             # data_gen submits) never sits fully in RAM.
             bundle_size, referenced_skips, swept_skips = build_bundle_to_file(
@@ -355,6 +365,8 @@ class CloudBackend(RemoteBackend):
             # The backend upserts the projects row on submit; missing
             # fields don't overwrite previously-recorded values.
             meta.update(gather_project_meta(self.project_dir, config).to_meta_dict())
+            if training_manifest:
+                meta["training_manifest"] = training_manifest
             # HF token donate path. This is the ONE place in the submit
             # flow where the plaintext token exists: it is read here,
             # goes straight onto the wire, and dies with this frame.
@@ -656,6 +668,86 @@ class CloudBackend(RemoteBackend):
         upsized the GPU for a large model. Raises CloudError on non-2xx.
         """
         return await self._get_snapshot(job_id)
+
+    async def _prepare_training_manifest(
+        self, config: dict[str, Any], kind: str, project_key: str
+    ) -> dict[str, Any]:
+        """Add the minimal lineage fields required by current cloud APIs.
+
+        The full lineage client landed after this branch's Leap integration.
+        For the compatibility path, register a hub base idempotently and
+        submit the immutable revision plus a hash of the exact config.
+        """
+        inner = (
+            config.get("base_config")
+            if config.get("type") == "sweep" and isinstance(config.get("base_config"), dict)
+            else config
+        )
+        base_ref = str(inner.get("base_model") or "").strip()
+        if not base_ref or "/" not in base_ref:
+            raise CloudError(
+                "cloud training requires a Hugging Face hub base model on this "
+                "integration branch; local checkpoints need the newer lineage client"
+            )
+        hub_id, _, inline_revision = base_ref.partition("@")
+        revision = str(inner.get("base_model_revision") or inline_revision).strip()
+        if not re.fullmatch(r"[0-9a-fA-F]{40}", revision):
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.get(
+                    f"https://huggingface.co/api/models/{hub_id}",
+                    params={"revision": revision or "main"},
+                )
+            if resp.status_code >= 400:
+                raise CloudError(
+                    f"could not resolve Hugging Face revision for {hub_id}: "
+                    f"{resp.status_code}"
+                )
+            revision = str(resp.json().get("sha") or "").strip()
+        if not re.fullmatch(r"[0-9a-fA-F]{40}", revision):
+            raise CloudError(f"Hugging Face did not return a commit revision for {hub_id}")
+
+        inner["base_model"] = hub_id
+        inner["base_model_revision"] = revision.lower()
+        existing_id = str(inner.get("base_model_version_id") or "").strip()
+        if existing_id:
+            model_version_id = existing_id
+        else:
+            async with httpx.AsyncClient(base_url=self._api_base, timeout=30.0) as client:
+                resp = await client.post(
+                    f"/v1/projects/{project_key}/models",
+                    json={
+                        "kind": "external_hub",
+                        "hub_id": hub_id,
+                        "hub_revision": revision.lower(),
+                    },
+                    headers=self._auth_headers(),
+                )
+            _raise_for_cloud_error(resp)
+            model_version_id = str(resp.json().get("id") or "").strip()
+        if not model_version_id:
+            raise CloudError("cloud backend returned no base model version id")
+
+        recipe = {
+            "train_sft": "sft",
+            "train_dpo": "dpo",
+            "train_grpo": "grpo",
+            "train_sft_sweep": "sft_sweep",
+            "train_dpo_sweep": "dpo_sweep",
+        }.get(kind, "sft")
+        manifest: dict[str, Any] = {
+            "recipe": recipe,
+            "base_model_version_id": model_version_id,
+            "config_sha": hashlib.sha256(
+                json.dumps(
+                    config, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+                ).encode("utf-8")
+            ).hexdigest(),
+            "hyperparams": inner.get("training") or {},
+            "resolved": {"base": f"{hub_id}@{revision.lower()}"},
+        }
+        if recipe in {"dpo", "dpo_sweep"}:
+            manifest["sft_base_model_version_id"] = model_version_id
+        return manifest
 
     async def _get_snapshot(self, job_id: str) -> dict[str, Any]:
         async with httpx.AsyncClient(base_url=self._api_base, timeout=30.0) as client:
